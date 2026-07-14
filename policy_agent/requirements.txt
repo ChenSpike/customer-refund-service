@@ -1,0 +1,4 @@
+mysql-connector-python>=9,<10
+openai>=1.99,<2
+pydantic>=2,<3
+pytest>=7,<9
