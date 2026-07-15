@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific (triage slice)
+db/refund_service.db
+db/*_local.db
+.DS_Store
