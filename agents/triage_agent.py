@@ -172,7 +172,7 @@ def triage_node(state: TriageState) -> dict:
             input_tokens=None, output_tokens=None,  # call was rejected pre-model
         )
         pipeline_store.update_workflow_run(
-            trace_id, status="pending_human", current_agent="human_approval")
+            trace_id, status="paused_governance", current_agent="human_approval")
         return {
             **ids,
             "llm_input_tokens": in_tok, "llm_output_tokens": out_tok,

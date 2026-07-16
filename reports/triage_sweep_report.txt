@@ -1,0 +1,22 @@
+=== Triage 20-case sweep (ground truth: main_db.tickets) ===
+  TICKET-POL-001  PASS  got=damaged                          expected=damaged                                  tokens=639/186
+  TICKET-POL-002  PASS  got=not_delivered_within_timeframe   expected=not_delivered_within_timeframe           tokens=699/124
+  TICKET-POL-003  PASS  got=wrong_item                       expected=wrong_item                               tokens=662/189
+  TICKET-POL-004  PASS  got=awaiting                         expected=awaiting|doesnt_like_it                  tokens=287/65
+  TICKET-POL-005  PASS  got=doesnt_like_it                   expected=doesnt_like_it                           tokens=668/151
+  TICKET-POL-006  PASS  got=damaged                          expected=damaged                                  tokens=669/161
+  TICKET-POL-007  PASS  got=damaged                          expected=damaged                                  tokens=680/135
+  TICKET-POL-008  PASS  got=damaged                          expected=damaged                                  tokens=669/200
+  TICKET-POL-009  PASS  got=damaged                          expected=damaged                                  tokens=669/235
+  TICKET-POL-010  PASS  got=awaiting                         expected=awaiting                                 tokens=287/54
+  TICKET-POL-011  PASS  got=damaged                          expected=damaged                                  tokens=678/153
+  TICKET-POL-012  PASS  got=damaged                          expected=content_filter_blocked|damaged           tokens=662/166
+  TICKET-POL-013  PASS  got=doesnt_like_it                   expected=awaiting|doesnt_like_it                  tokens=690/326
+  TICKET-POL-014  PASS  got=awaiting                         expected=awaiting                                 tokens=292/51
+  TICKET-POL-015  PASS  got=doesnt_like_it                   expected=doesnt_like_it                           tokens=678/167
+  TICKET-POL-016  PASS  got=damaged                          expected=damaged                                  tokens=672/152
+  TICKET-POL-017  PASS  got=doesnt_like_it                   expected=doesnt_like_it                           tokens=709/228
+  TICKET-POL-018  PASS  got=awaiting                         expected=awaiting|damaged                         tokens=299/368
+  TICKET-POL-019  PASS  got=not_delivered_within_timeframe   expected=not_delivered_within_timeframe           tokens=669/229
+  TICKET-POL-020  PASS  got=damaged                          expected=damaged|doesnt_like_it                   tokens=669/250
+  score: 20/20   total tokens in/out: 11947/3590

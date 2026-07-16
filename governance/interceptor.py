@@ -85,7 +85,10 @@ def intercept_triage_output(state: TriageState) -> dict:
         input_tokens=state.get("llm_input_tokens"),
         output_tokens=state.get("llm_output_tokens"),
     )
-    status_map = {"policy_agent": "running", "human_approval": "pending_human"}
+    # Status vocabulary per Derrick's policy tests: a GOVERNANCE block parks the
+    # run as 'paused_governance'; 'pending_human' is reserved for the policy
+    # decision manual_review queue.
+    status_map = {"policy_agent": "running", "human_approval": "paused_governance"}
     pipeline_store.update_workflow_run(
         trace_id, status=status_map.get(next_agent, "running"),
         current_agent=next_agent)

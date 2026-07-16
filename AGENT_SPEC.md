@@ -366,7 +366,7 @@ writes real rows to the shared `main_db`:
 | Table | When | What |
 |---|---|---|
 | `tickets` | run start (INSERT IGNORE) → Case C backfill | raw_text, then sanitized_text / refund_reason / requested_amount / status='triaged'; content-filter → injection_flag=1 + status='blocked' (proposed vocabulary) |
-| `workflow_runs` | run start → after verdict | status='running' → 'running' (policy_agent) / 'pending_human' (human_approval); current_agent advanced |
+| `workflow_runs` | run start → after verdict | status='running' → 'running' (policy_agent) / 'paused_governance' (governance block → human_approval; per Derrick's status vocabulary, 'pending_human' is reserved for the policy manual_review queue); current_agent advanced |
 | `agent_handoffs` | after the interceptor verdict (content-filter path writes it in triage, since the interceptor never runs there) | Derrick-shaped input_json/output_json; block paths append `governance_result`; `input_tokens`/`output_tokens` from Azure usage |
 | `audit_log` / `governance_events` | every event / verdict | remote-first via audit_logger; local SQLite fallback |
 

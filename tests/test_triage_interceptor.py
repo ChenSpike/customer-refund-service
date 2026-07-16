@@ -156,7 +156,8 @@ class TestInterceptorPipelineWrites:
         _, kw = handoffs[0]
         assert kw["to_agent"] == "human_approval"
         assert kw["output_json"]["governance_result"]["failed_check"] == "ownership"
-        assert run_updates[0][1] == {"status": "pending_human",
+        # governance block → paused_governance (Derrick's status vocabulary)
+        assert run_updates[0][1] == {"status": "paused_governance",
                                      "current_agent": "human_approval"}
 
 
