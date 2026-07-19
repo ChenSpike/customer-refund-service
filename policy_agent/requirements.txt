@@ -1,4 +1,6 @@
 mysql-connector-python>=9,<10
 openai>=1.99,<2
 pydantic>=2,<3
+langgraph>=1.2,<2
+PyYAML>=6,<7
 pytest>=7,<9

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Any
 
-from .azure_agent import AzurePolicyAgents
 from .cloud_db import GCPRepository, RunMode
-from .models import PolicyAgentOutput, TokenUsage, exact_policy_input
-
-
-POLICY_AGENT_DIR = Path(__file__).resolve().parent
-POLICY_CONTEXTS = {"v1.0": POLICY_AGENT_DIR / "data" / "policy_context_v1.md"}
+from .graph import build_policy_agent_graph
+from .models import (
+    GovernanceAssessment,
+    PolicyAgentOutput,
+    PolicyReasoningResult,
+    PrecedentContext,
+    TokenUsage,
+    exact_policy_input,
+)
 
 
 @dataclass(frozen=True)
@@ -17,16 +20,18 @@ class ProcessedCase:
     handoff_id: str
     output: PolicyAgentOutput
     usage: TokenUsage
+    policy_usage: TokenUsage
+    governance_usage: TokenUsage
 
 
 class PolicyAgentService:
-    def __init__(self, repository: GCPRepository, agents: AzurePolicyAgents) -> None:
+    def __init__(self, repository: GCPRepository, graph: Any) -> None:
         self.repository = repository
-        self.agents = agents
+        self.graph = graph
 
     @classmethod
     def from_env(cls) -> "PolicyAgentService":
-        return cls(GCPRepository.from_env(), AzurePolicyAgents.from_env())
+        return cls(GCPRepository.from_env(), build_policy_agent_graph())
 
     def run(self, mode: RunMode, trace_id: str | None = None) -> list[ProcessedCase]:
         sources = self.repository.fetch_source_handoffs(mode, trace_id)
@@ -38,10 +43,23 @@ class PolicyAgentService:
         for source in sources:
             try:
                 policy_input = exact_policy_input(source.payload())
-                policy_context = load_policy_context(policy_input.case.policy_version)
-                result = self.agents.evaluate(policy_input, policy_context)
-                handoff_id = self.repository.persist_result(policy_input, result.output, result.usage)
-                processed.append(ProcessedCase(handoff_id, result.output, result.usage))
+                result = self.graph.invoke({"policy_input": policy_input})
+                output = PolicyAgentOutput.model_validate(result["policy_output"])
+                policy_result = PolicyReasoningResult.model_validate(result["policy_result"])
+                precedent_context = PrecedentContext.model_validate(result["precedent_context"])
+                assessment = GovernanceAssessment.model_validate(result["governance_assessment"])
+                usage = TokenUsage.model_validate(result["usage"])
+                policy_usage = TokenUsage.model_validate(result["policy_usage"])
+                governance_usage = TokenUsage.model_validate(result["governance_usage"])
+                handoff_id = self.repository.persist_result(
+                    policy_input,
+                    output,
+                    policy_result,
+                    precedent_context,
+                    assessment.findings,
+                    usage,
+                )
+                processed.append(ProcessedCase(handoff_id, output, usage, policy_usage, governance_usage))
             except Exception as error:
                 try:
                     self.repository.record_failure(source.trace_id, error)
@@ -49,10 +67,3 @@ class PolicyAgentService:
                     pass
                 raise RuntimeError(f"{source.trace_id}: Policy Agent processing failed: {error}") from error
         return processed
-
-
-def load_policy_context(policy_version: str) -> str:
-    path = POLICY_CONTEXTS.get(policy_version)
-    if path is None:
-        raise ValueError(f"Unsupported policy knowledge-base version: {policy_version}")
-    return path.read_text(encoding="utf-8")
