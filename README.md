@@ -41,6 +41,308 @@ An automated, state-driven multi-agent workflow for evaluating and processing e-
                                        [ END ] 
 ```
 
+## Core State Table
+
+Keep only the core workflow state.
+
+| State Field | Type | Description | Main Stages |
+|---|---|---|---|
+| `user_id` | `str` | User who submitted the request | Input, Governance |
+| `message` | `str` | Current user message | Triage |
+| `conversation_history` | `list` | Prior conversation context | Triage |
+| `request_context` | `dict` | External metadata such as channel, locale, or source | Input |
+| `trace_id` | `str` | End-to-end workflow trace ID | All stages |
+| `ticket_id` | `str` | Case or ticket identifier | All stages |
+| `current_stage` | `str` | Current workflow node | All stages |
+| `workflow_status` | `str` | Overall workflow status such as `running`, `waiting_user`, `waiting_human`, or `completed` | All stages |
+| `missing_fields` | `list[str]` | Required fields that are still missing | Triage, Response |
+| `user_action_required` | `bool` | Whether the workflow is waiting for user input | Triage Router, Response |
+| `human_review_required` | `bool` | Whether the case must be reviewed by a human | Governance, Policy Router |
+| `final_outcome` | `str` | Final case result such as `approved`, `denied`, `need_info`, or `manual_review` | End stages |
+| `requested_order_id` | `str` | Order ID extracted from the user message | Triage |
+| `clarification_question` | `str` | Follow-up question sent back to the user | Response |
+| `order_lookup_result` | `dict` | Raw order data returned by the lookup tool | Triage, Audit |
+| `triage_output` | `dict` | Structured case payload produced by triage | Triage Governance, Policy |
+| `governance_result` | `dict` | Governance decision with allow or block result | Routers, Human Approval |
+| `risk_flags` | `dict` | Consolidated risk signals such as PII, content filter, injection, or tool misuse | Governance |
+| `policy_decision` | `dict` | Final policy decision for the refund case | Policy Governance, Routers, Downstream |
+| `policy_context` | `dict` | Supporting policy metadata such as rule version or retrieval context | Policy, Audit |
+| `refund_result` | `dict` | Output from the refund execution branch | Refund Agent |
+| `response_result` | `dict` | Output from the user response branch | Response Agent |
+| `human_review` | `dict` | Output from the human approval branch | Human Approval |
+| `errors` | `list[dict]` | Collected workflow errors or exceptions | All stages |
+| `audit_trail` | `list[dict]` | Audit records written across important steps | Governance, Persistence |
+| `snapshots` | `list[dict]` | State snapshots for tracing and replay | Middleware, Observability |
+| `llm_input_tokens` | `int` | Total input tokens used by LLM calls | Triage, Policy |
+| `llm_output_tokens` | `int` | Total output tokens used by LLM calls | Triage, Policy |
+
+Removed from the core state table:
+
+- `case` -> use `request_context`
+- `awaiting_info` -> use `missing_fields` and `user_action_required`
+- `awaiting_order_id` -> use `missing_fields` and `user_action_required`
+- `next_agent` -> routing belongs to routers
+- `buggy_db` -> test-only, not part of core workflow state
+- `content_filter_blocked` -> use `risk_flags`
+- `injection_flag` -> use `risk_flags`
+
+## Stage Flow Using The New State Table
+
+### 1. User Input
+
+This stage prepares the minimum context for the workflow.
+
+- Input fields: `user_id`, `message`, `conversation_history`, `request_context`
+- System fields created or continued here: `trace_id`, `ticket_id`
+- Initial control state:
+        - `current_stage = "triage"`
+        - `workflow_status = "running"`
+        - `missing_fields = []`
+        - `user_action_required = False`
+        - `human_review_required = False`
+        - `final_outcome = ""`
+
+### 2. Triage Agent
+
+Triage converts the raw user message into structured case data.
+
+Reads:
+
+- `user_id`
+- `message`
+- `conversation_history`
+- `request_context`
+- `trace_id`
+- `ticket_id`
+
+Writes:
+
+- `current_stage = "triage"`
+- `requested_order_id`
+- `order_lookup_result`
+- `triage_output`
+- `clarification_question`
+- `missing_fields`
+- `user_action_required`
+- `workflow_status`
+- `conversation_history`
+- `llm_input_tokens`
+- `llm_output_tokens`
+- `errors` if extraction or lookup fails unexpectedly
+
+Typical results:
+
+- If order data is complete:
+        - `triage_output` is ready
+        - `missing_fields = []`
+        - `user_action_required = False`
+        - `workflow_status = "running"`
+- If data is missing:
+        - `missing_fields = ["order_id"]`
+        - `user_action_required = True`
+        - `clarification_question` contains the follow-up question
+        - `workflow_status = "waiting_user"`
+
+### 3. Triage Governance
+
+This stage checks whether the triage result is safe before policy evaluation.
+
+Reads:
+
+- `triage_output`
+- `trace_id`
+- `ticket_id`
+- `user_id`
+
+Writes:
+
+- `current_stage = "triage_governance"`
+- `governance_result`
+- `risk_flags`
+- `audit_trail`
+- `snapshots`
+- `human_review_required` when blocked
+- `workflow_status` when blocked
+
+Typical results:
+
+- If safe:
+        - `governance_result.status = "allow"`
+- If blocked:
+        - `governance_result.status = "block"`
+        - `human_review_required = True`
+        - `workflow_status = "waiting_human"`
+
+### 4. Triage Router
+
+This stage does not create business data. It only reads control state and selects the next node.
+
+Reads:
+
+- `governance_result`
+- `missing_fields`
+- `user_action_required`
+- `triage_output`
+
+Routing rules:
+
+- If `governance_result.status == "block"` -> `Human Approval`
+- If `user_action_required == True` -> `Response Agent`
+- If `triage_output` is complete -> `Policy Agent`
+
+### 5. Policy Agent
+
+Policy evaluates the structured case and decides the refund outcome.
+
+Reads:
+
+- `triage_output`
+- `trace_id`
+- `ticket_id`
+
+Writes:
+
+- `current_stage = "policy"`
+- `policy_decision`
+- `policy_context`
+- `llm_input_tokens`
+- `llm_output_tokens`
+- `errors` if policy generation fails
+
+Typical results:
+
+- `policy_decision.decision` becomes one of:
+        - `approve`
+        - `partial_refund`
+        - `deny`
+        - `request_info`
+        - `manual_review`
+
+### 6. Policy Governance
+
+This stage checks whether the policy result is safe and valid.
+
+Reads:
+
+- `policy_decision`
+- `policy_context`
+- `trace_id`
+- `ticket_id`
+- `user_id`
+
+Writes:
+
+- `current_stage = "policy_governance"`
+- `governance_result`
+- `risk_flags`
+- `audit_trail`
+- `snapshots`
+- `human_review_required` when blocked
+- `workflow_status` when blocked
+
+Typical results:
+
+- If safe:
+        - `governance_result.status = "allow"`
+- If blocked:
+        - `governance_result.status = "block"`
+        - `human_review_required = True`
+        - `workflow_status = "waiting_human"`
+
+### 7. Policy Router
+
+This stage reads the policy result and sends the workflow to the correct final branch.
+
+Reads:
+
+- `governance_result`
+- `policy_decision`
+
+Routing rules:
+
+- If `governance_result.status == "block"` -> `Human Approval`
+- If `policy_decision.decision in {"approve", "partial_refund"}` -> `Refund Agent`
+- If `policy_decision.decision in {"deny", "request_info"}` -> `Response Agent`
+- If `policy_decision.decision == "manual_review"` -> `Human Approval`
+
+### 8. Refund Agent
+
+This is the execution branch for approved refund outcomes.
+
+Reads:
+
+- `policy_decision`
+- `trace_id`
+- `ticket_id`
+
+Writes:
+
+- `current_stage = "refund_agent"`
+- `refund_result`
+- `final_outcome`
+- `workflow_status = "completed"`
+
+Typical results:
+
+- If fully approved: `final_outcome = "approved"`
+- If partially approved: `final_outcome = "partial_refund"`
+
+### 9. Response Agent
+
+This is the user-facing response branch. It is used for missing data and final business responses.
+
+Reads:
+
+- `clarification_question`
+- `missing_fields`
+- `user_action_required`
+- `policy_decision`
+
+Writes:
+
+- `current_stage = "response_agent"`
+- `response_result`
+- `final_outcome`
+- `workflow_status`
+
+Typical results:
+
+- If waiting for user data:
+        - `response_result` asks for the missing information
+        - `final_outcome = "need_info"`
+        - `workflow_status = "waiting_user"`
+- If policy denied:
+        - `response_result` explains the denial
+        - `final_outcome = "denied"`
+        - `workflow_status = "completed"`
+- If policy requested more info:
+        - `response_result` asks for the required information
+        - `final_outcome = "need_info"`
+        - `workflow_status = "waiting_user"`
+
+### 10. Human Approval
+
+This is the manual review branch for blocked or ambiguous cases.
+
+Reads:
+
+- `governance_result`
+- `policy_decision`
+- `trace_id`
+- `ticket_id`
+
+Writes:
+
+- `current_stage = "human_approval"`
+- `human_review`
+- `human_review_required = True`
+- `final_outcome = "manual_review"`
+- `workflow_status = "waiting_human"`
+
+Typical result:
+
+- The workflow stops and waits for a human reviewer to take over.
+
 ## Core Development Rules
 
 1. **Agents**: Return business data patches only. Never include routing fields (`next_agent`) or database calls in agent nodes.
