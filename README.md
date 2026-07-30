@@ -33,6 +33,8 @@ An automated, state-driven multi-agent workflow for evaluating and processing e-
                |                          |        | (approve)       | (deny / info)   | (block / review)
                |                          |        v                 |                 |
                |                          |  [ Refund Agent ]        |                 |
+               |                          |        v                 |                 |
+               |                          |  [ Refund Router ]       |                 |
                |                          |        |                 |                 |
                |                          v        v                 |                 v
                +----------------------> [ Response Agent ] <---------+---------[ Human Approval ]
@@ -58,7 +60,7 @@ Keep only the core workflow state.
 | `missing_fields` | `list[str]` | Required fields that are still missing | Triage, Response |
 | `user_action_required` | `bool` | Whether the workflow is waiting for user input | Triage Router, Response |
 | `human_review_required` | `bool` | Whether the case must be reviewed by a human | Governance, Policy Router |
-| `final_outcome` | `str` | Final case result such as `approved`, `denied`, `need_info`, or `manual_review` | End stages |
+| `final_outcome` | `str` | Final case result such as `approved`, `denied`, `need_info`, `refund_failed`, or `manual_review` | End stages |
 | `requested_order_id` | `str` | Order ID extracted from the user message | Triage |
 | `clarification_question` | `str` | Follow-up question sent back to the user | Response |
 | `order_lookup_result` | `dict` | Raw order data returned by the lookup tool | Triage, Audit |
@@ -70,11 +72,11 @@ Keep only the core workflow state.
 | `refund_result` | `dict` | Output from the refund execution branch | Refund Agent |
 | `response_result` | `dict` | Output from the user response branch | Response Agent |
 | `human_review` | `dict` | Output from the human approval branch | Human Approval |
-| `errors` | `list[dict]` | Collected workflow errors or exceptions | All stages |
-| `audit_trail` | `list[dict]` | Audit records written across important steps | Governance, Persistence |
-| `snapshots` | `list[dict]` | State snapshots for tracing and replay | Middleware, Observability |
-| `llm_input_tokens` | `int` | Total input tokens used by LLM calls | Triage, Policy |
-| `llm_output_tokens` | `int` | Total output tokens used by LLM calls | Triage, Policy |
+| `errors` | `Annotated[list[dict], operator.add]` | Append-only list of workflow errors or exceptions | All stages |
+| `audit_trail` | `Annotated[list[dict], operator.add]` | Append-only list of audit records written across important steps | Governance, Persistence |
+| `snapshots` | `Annotated[list[dict], operator.add]` | Append-only list of state snapshots for tracing and replay | Middleware, Observability |
+| `llm_input_tokens` | `Annotated[int, operator.add]` | Additive total of input tokens reported by each LLM node | Triage, Policy |
+| `llm_output_tokens` | `Annotated[int, operator.add]` | Additive total of output tokens reported by each LLM node | Triage, Policy |
 
 Removed from the core state table:
 
@@ -213,7 +215,6 @@ Typical results:
 
 - `policy_decision.decision` becomes one of:
         - `approve`
-        - `partial_refund`
         - `deny`
         - `request_info`
         - `manual_review`
@@ -261,7 +262,7 @@ Reads:
 Routing rules:
 
 - If `governance_result.status == "block"` -> `Human Approval`
-- If `policy_decision.decision in {"approve", "partial_refund"}` -> `Refund Agent`
+- If `policy_decision.decision == "approve"` -> `Refund Agent`
 - If `policy_decision.decision in {"deny", "request_info"}` -> `Response Agent`
 - If `policy_decision.decision == "manual_review"` -> `Human Approval`
 
@@ -274,20 +275,35 @@ Reads:
 - `policy_decision`
 - `trace_id`
 - `ticket_id`
+- `requested_order_id`
+- `order_lookup_result`
 
 Writes:
 
 - `current_stage = "refund_agent"`
 - `refund_result`
 - `final_outcome`
-- `workflow_status = "completed"`
+- `workflow_status = "running"`
 
 Typical results:
 
 - If fully approved: `final_outcome = "approved"`
-- If partially approved: `final_outcome = "partial_refund"`
+- If refund execution fails: `final_outcome = "refund_failed"`
 
-### 9. Response Agent
+### 9. Refund Router
+
+This stage reads the refund execution result and sends the workflow to the response branch.
+
+Reads:
+
+- `refund_result`
+
+Routing rules:
+
+- If `refund_result.status == "success"` -> `Response Agent`
+- If `refund_result.status == "failed"` -> `Response Agent`
+
+### 10. Response Agent
 
 This is the user-facing response branch. It is used for missing data and final business responses.
 
@@ -297,6 +313,7 @@ Reads:
 - `missing_fields`
 - `user_action_required`
 - `policy_decision`
+- `refund_result`
 
 Writes:
 
@@ -311,6 +328,14 @@ Typical results:
         - `response_result` asks for the missing information
         - `final_outcome = "need_info"`
         - `workflow_status = "waiting_user"`
+- If refund succeeded:
+        - `response_result` confirms the refund was processed
+        - `final_outcome = "approved"`
+        - `workflow_status = "completed"`
+- If refund failed:
+        - `response_result` explains the refund could not be completed
+        - `final_outcome = "refund_failed"`
+        - `workflow_status = "completed"`
 - If policy denied:
         - `response_result` explains the denial
         - `final_outcome = "denied"`
@@ -320,7 +345,7 @@ Typical results:
         - `final_outcome = "need_info"`
         - `workflow_status = "waiting_user"`
 
-### 10. Human Approval
+### 11. Human Approval
 
 This is the manual review branch for blocked or ambiguous cases.
 

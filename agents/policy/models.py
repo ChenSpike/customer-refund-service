@@ -4,7 +4,6 @@ from typing import Literal, TypedDict
 DecisionType = Literal[
     "approve",
     "deny",
-    "partial_refund",
     "request_info",
     "manual_review",
 ]

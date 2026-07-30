@@ -21,8 +21,6 @@ def triage_node(state) -> dict:
 
     trace_id = state.get("trace_id") or str(uuid.uuid4())
     ticket_id = state.get("ticket_id") or str(uuid.uuid4())
-    input_tokens = int(state.get("llm_input_tokens") or 0)
-    output_tokens = int(state.get("llm_output_tokens") or 0)
     ids = {
         "trace_id": trace_id,
         "ticket_id": ticket_id,
@@ -44,8 +42,8 @@ def triage_node(state) -> dict:
         return {
             **ids,
             "user_id": user_id,
-            "llm_input_tokens": input_tokens,
-            "llm_output_tokens": output_tokens,
+            "llm_input_tokens": 0,
+            "llm_output_tokens": 0,
             "awaiting_order_id": False,
             "content_filter_blocked": True,
             "injection_flag": True,
@@ -58,9 +56,7 @@ def triage_node(state) -> dict:
             "conversation_history": history + [user_msg],
         }
 
-    used_in, used_out = usage_tokens(first)
-    input_tokens += used_in
-    output_tokens += used_out
+    first_input_tokens, first_output_tokens = usage_tokens(first)
 
     tool_call = next(
         (item for item in first.output if item.type == "function_call"),
@@ -72,8 +68,8 @@ def triage_node(state) -> dict:
         return {
             **ids,
             "user_id": user_id,
-            "llm_input_tokens": input_tokens,
-            "llm_output_tokens": output_tokens,
+            "llm_input_tokens": first_input_tokens,
+            "llm_output_tokens": first_output_tokens,
             "awaiting_order_id": True,
             "clarification_question": question,
             "conversation_history": history + [user_msg, assistant_msg(question)],
@@ -88,8 +84,8 @@ def triage_node(state) -> dict:
         return {
             **ids,
             "user_id": user_id,
-            "llm_input_tokens": input_tokens,
-            "llm_output_tokens": output_tokens,
+            "llm_input_tokens": first_input_tokens,
+            "llm_output_tokens": first_output_tokens,
             "awaiting_order_id": True,
             "clarification_question": question,
             "conversation_history": history + [user_msg, assistant_msg(question)],
@@ -107,9 +103,9 @@ def triage_node(state) -> dict:
         text={"format": {"type": "json_object"}},
     )
 
-    used_in, used_out = usage_tokens(second)
-    input_tokens += used_in
-    output_tokens += used_out
+    second_input_tokens, second_output_tokens = usage_tokens(second)
+    total_input_tokens = first_input_tokens + second_input_tokens
+    total_output_tokens = first_output_tokens + second_output_tokens
 
     classification = json.loads(extract_text(second))
     raw_reason = classification.get("refund_reason", "doesnt_like_it")
@@ -145,8 +141,8 @@ def triage_node(state) -> dict:
     return {
         **ids,
         "user_id": user_id,
-        "llm_input_tokens": input_tokens,
-        "llm_output_tokens": output_tokens,
+        "llm_input_tokens": total_input_tokens,
+        "llm_output_tokens": total_output_tokens,
         "awaiting_order_id": False,
         "order_lookup_result": raw_result,
         "triage_output": triage_output,

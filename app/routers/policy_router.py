@@ -6,7 +6,7 @@ def route_after_policy(state) -> str:
 
     decision = state.get("policy_decision", {}).get("decision")
 
-    if decision in {"approve", "partial_refund"}:
+    if decision == "approve":
         return "refund_agent"
     if decision == "deny":
         return "response_agent"

@@ -39,8 +39,6 @@ def _normalize_decision(raw: dict) -> PolicyDecision:
 
 def policy_node(state) -> dict:
     triage_output = state["triage_output"]
-    input_tokens = int(state.get("llm_input_tokens") or 0)
-    output_tokens = int(state.get("llm_output_tokens") or 0)
 
     response = client.responses.create(
         model="gpt-5.4",
@@ -55,8 +53,6 @@ def policy_node(state) -> dict:
     )
 
     used_in, used_out = usage_tokens(response)
-    input_tokens += used_in
-    output_tokens += used_out
 
     try:
         raw = json.loads(extract_text(response))
@@ -74,6 +70,6 @@ def policy_node(state) -> dict:
         "trace_id": state.get("trace_id"),
         "ticket_id": state.get("ticket_id"),
         "policy_decision": policy_decision,
-        "llm_input_tokens": input_tokens,
-        "llm_output_tokens": output_tokens,
+        "llm_input_tokens": used_in,
+        "llm_output_tokens": used_out,
     }

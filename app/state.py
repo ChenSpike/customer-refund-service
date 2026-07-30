@@ -1,25 +1,31 @@
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
 
 
 class AppState(TypedDict, total=False):
     # input
     user_id: str
     message: str
+    request_context: dict
     buggy_db: bool
-    case: dict
 
     # ids
     trace_id: str
     ticket_id: str
+    current_stage: str
+    workflow_status: str
 
     # llm usage
-    llm_input_tokens: int
-    llm_output_tokens: int
+    llm_input_tokens: Annotated[int, operator.add]
+    llm_output_tokens: Annotated[int, operator.add]
 
     # conversation
     conversation_history: list
-    awaiting_order_id: bool
-    awaiting_info: bool
+    missing_fields: list[str]
+    user_action_required: bool
+    human_review_required: bool
+    final_outcome: str
+    requested_order_id: str
     clarification_question: str
 
     # triage outputs
@@ -28,16 +34,18 @@ class AppState(TypedDict, total=False):
 
     # governance
     governance_result: dict
-    content_filter_blocked: bool
-    injection_flag: bool
+    risk_flags: dict
 
     # policy outputs
     policy_decision: dict
-
-    # routing
-    next_agent: str
+    policy_context: dict
 
     # downstream placeholders
     refund_result: dict
     response_result: dict
     human_review: dict
+
+    # observability
+    errors: Annotated[list[dict], operator.add]
+    audit_trail: Annotated[list[dict], operator.add]
+    snapshots: Annotated[list[dict], operator.add]
