@@ -379,7 +379,6 @@ class GovernanceAssessment(StrictModel):
 
     governance: Governance
     findings: list[GovernanceFinding] = Field(default_factory=list)
-    handoff: Handoff
 
     @model_validator(mode="after")
     def validate_findings(self) -> "GovernanceAssessment":
@@ -408,17 +407,12 @@ class PolicyAgentOutput(StrictModel):
 
     @model_validator(mode="after")
     def validate_route(self) -> "PolicyAgentOutput":
-        expected_route = (
-            "human_approval"
-            if self.governance.interceptor_action == "quarantine"
-            else {
-                "approve": "refund_agent",
-                "partial_refund": "refund_agent",
-                "deny": "response_agent",
-                "request_info": "triage_agent",
-                "manual_review": "human_approval",
-            }[self.decision.type]
+        from .routing import route_policy
+
+        governance_status = (
+            "block" if self.governance.interceptor_action == "quarantine" else "allow"
         )
+        expected_route = route_policy(self.decision.type, governance_status)
         if self.handoff.next_agent != expected_route:
             raise ValueError(f"decision and governance require route {expected_route}")
         return self

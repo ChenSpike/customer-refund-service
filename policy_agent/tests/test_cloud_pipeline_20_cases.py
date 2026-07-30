@@ -49,11 +49,11 @@ EXPECTED_ROUTES = {
     "TRACE-POL-007": "human_approval",
     "TRACE-POL-008": "human_approval",
     "TRACE-POL-009": "human_approval",
-    "TRACE-POL-010": "triage_agent",
+    "TRACE-POL-010": "response_agent",
     "TRACE-POL-011": "human_approval",
     "TRACE-POL-012": "human_approval",
     "TRACE-POL-013": "human_approval",
-    "TRACE-POL-014": "triage_agent",
+    "TRACE-POL-014": "response_agent",
     "TRACE-POL-015": "human_approval",
     "TRACE-POL-016": "refund_agent",
     "TRACE-POL-017": "response_agent",
@@ -158,9 +158,8 @@ def test_live_langgraph_policy_agent_processes_20_gcp_cases() -> None:
     assert Counter(confidences.values()) == {3: 15, 2: 1, 1: 2, 0: 2}
     assert Counter(routes.values()) == {
         "refund_agent": 4,
-        "response_agent": 4,
+        "response_agent": 6,
         "human_approval": 10,
-        "triage_agent": 2,
     }
 
     records = repository.fetch_case_records()

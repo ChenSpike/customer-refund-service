@@ -15,6 +15,7 @@ from .models import (
     TokenUsage,
 )
 from .policy_node import PolicyReasoningNode
+from .state_adapter import assemble_policy_output
 
 
 class PolicyGraphInput(TypedDict):
@@ -44,8 +45,24 @@ def build_policy_agent_graph(client: AzureJsonClient | None = None):
         input_schema=PolicyGraphInput,
         output_schema=PolicyGraphOutput,
     )
-    builder.add_node("policy_reasoning", PolicyReasoningNode(azure))
-    builder.add_node("governance", GovernanceNode(azure))
+    policy_node = PolicyReasoningNode(azure)
+    governance_node = GovernanceNode(azure)
+
+    def governance_step(state: PolicyGraphState) -> dict:
+        result = governance_node(state)
+        assessment = GovernanceAssessment.model_validate(result["governance_assessment"])
+        policy_result = PolicyReasoningResult.model_validate(state["policy_result"])
+        policy_usage = TokenUsage.model_validate(state["policy_usage"])
+        governance_usage = TokenUsage.model_validate(result["governance_usage"])
+        return {
+            "governance_assessment": assessment,
+            "policy_output": assemble_policy_output(policy_result, assessment),
+            "governance_usage": governance_usage,
+            "usage": policy_usage.add(governance_usage),
+        }
+
+    builder.add_node("policy_reasoning", policy_node)
+    builder.add_node("governance", governance_step)
     builder.add_edge(START, "policy_reasoning")
     builder.add_edge("policy_reasoning", "governance")
     builder.add_edge("governance", END)

@@ -1,8 +1,14 @@
 # Policy Agent
 
-The Policy Agent converts a validated Triage Agent handoff into a governed refund-policy decision and downstream handoff. A service layer reads GCP, invokes a two-node LangGraph (`policy_reasoning -> governance`), and transactionally writes the result back to GCP MySQL `main_db`.
+The Policy Agent converts a validated Triage state into a governed refund-policy decision. Its production integration is state-driven:
 
-The policy node evaluates the versioned knowledge base and optional precedent evidence. The governance node independently returns either `allow` or `quarantine` without changing the policy decision. Azure OpenAI performs both reasoning stages; Python enforces contracts, routing, repair limits, and persistence without substituting a local decision.
+```text
+Parent AppState -> policy_reasoning -> policy_governance -> parent router -> parent persistence
+```
+
+The agent nodes return typed state patches only. They do not select the next node or write a database. The parent router owns routing and the parent persistence layer writes GCP. The existing `PolicyAgentService` remains available as a standalone GCP runner and uses the same reasoning, governance, routing, and Proposal contracts.
+
+The policy node evaluates the versioned knowledge base and optional precedent evidence. The governance node independently reviews OWASP risks without changing the policy decision. Azure OpenAI performs both reasoning stages; Python enforces contracts, routing consistency, repair limits, and persistence boundaries without substituting a local decision.
 
 ## Index
 
@@ -18,8 +24,9 @@ The policy node evaluates the versioned knowledge base and optional precedent ev
 5. [Technical Contracts](#5-technical-contracts)
    1. [Input](#51-input)
    2. [Output](#52-output)
-   3. [Validation Repair And Failure](#53-validation-repair-and-failure)
-   4. [GCP Persistence](#54-gcp-persistence)
+   3. [Shared State](#53-shared-state)
+   4. [Validation Repair And Failure](#54-validation-repair-and-failure)
+   5. [GCP Persistence](#55-gcp-persistence)
 6. [Setup Run And Test](#6-setup-run-and-test)
 7. [Where To Modify Behavior](#7-where-to-modify-behavior)
 8. [Current Limitations](#8-current-limitations)
@@ -30,9 +37,10 @@ The policy node evaluates the versioned knowledge base and optional precedent ev
 |---|---|
 | Receives | Structured request and order facts from `triage_agent` |
 | Decides | Applicable refund rules, decision, refund amount, confidence, and response guidance |
-| Governs | Semantic drift, forbidden tool claims, and PII risk through `allow` or `quarantine` |
-| Produces | A validated output and route to `refund_agent`, `response_agent`, `triage_agent`, or `human_approval` |
-| Persists | Handoff, review events, one typed human-approval trigger, audit evidence, tokens, and workflow state |
+| Governs | Semantic drift, forbidden tool claims, and PII risk without rewriting the policy result |
+| Produces | Typed Policy and Policy Governance state patches |
+| Routes | Parent router selects `refund_agent`, `response_agent`, or `human_approval` |
+| Persists | Parent persistence writes GCP; the standalone service retains its own compatible writer |
 
 The component begins after triage has identified and sanitized the case. Refund execution and final customer communication remain downstream responsibilities.
 
@@ -40,45 +48,45 @@ The component begins after triage has identified and sanitized the case. Refund 
 
 ```mermaid
 flowchart TD
-    A["1. Service reads Triage handoff from GCP"] --> B["2. Normalize strict Policy Agent input"]
+    A["1. Parent passes Triage state"] --> B["2. Adapter normalizes strict Policy Agent input"]
     B --> C["3. policy_reasoning loads KB and precedents"]
     C --> D["4. Azure returns policy decision and confidence"]
-    D --> E["5. governance reviews the preserved policy result"]
-    E --> F["6. Azure returns allow or quarantine"]
-    F --> G["7. Validate and select downstream route"]
-    G --> H["8. Persist handoff, events, approval trigger, audit, and workflow"]
+    D --> E["5. policy_governance reviews the preserved policy result"]
+    E --> F["6. Adapter returns allow or block state"]
+    F --> G["7. Parent router selects downstream node"]
+    G --> H["8. Parent persistence writes handoff, events, audit, and workflow"]
     D -. "Invalid after one repair" .-> X["Record failure and stop"]
     F -. "Invalid after one repair" .-> X
 ```
 
-`service.py` owns the GCP-to-graph-to-GCP boundary. Inside the compiled graph, `policy_reasoning` produces the complete policy result and usage, then `governance` preserves that result while adding governance, route, and aggregate usage.
+`state_adapter.py` owns the parent-state boundary. It maps `triage_output` to the strict Proposal input, exposes separate Policy and Policy Governance nodes, and reconstructs the Proposal output for persistence. `service.py` owns only the retained standalone GCP-to-graph-to-GCP path.
 
 ## 3. How Cases Reach Downstream Agents
 
-Routing evaluates governance first because `quarantine` overrides every policy decision. When governance returns `allow`, the policy decision selects the downstream bucket.
+Routing evaluates Policy Governance first because `block` overrides every policy decision. When governance returns `allow`, the policy decision selects the downstream bucket.
 
 ```mermaid
 flowchart TD
     A["Completed policy decision"] --> B{"Governance finding?"}
-    B -- "Yes: Quarantine" --> H["Human Approval<br/>human_approval"]
+    B -- "Yes: Block" --> H["Human Approval<br/>human_approval"]
     B -- "No: Allow" --> C{"Policy decision"}
     C -- Approve --> R["Refund Agent<br/>refund_agent"]
     C -- "Partial refund" --> R
     C -- Deny --> S["Response Agent<br/>response_agent"]
-    C -- "Request information" --> T["Triage Agent<br/>triage_agent"]
+    C -- "Request information" --> S
     C -- "Manual review" --> H
 ```
 
 | Evaluation order | Governance result | Policy decision | Final downstream bucket | Workflow state |
 |---:|---|---|---|---|
-| `1` | `quarantine` | Any decision | `human_approval` | `pending_human / human_approval` |
+| `1` | `block` | Any decision | `human_approval` | `waiting_human / human_approval` |
 | `2` | `allow` | `approve` | `refund_agent` | `running / refund_agent` |
 | `2` | `allow` | `partial_refund` | `refund_agent` | `running / refund_agent` |
 | `2` | `allow` | `deny` | `response_agent` | `running / response_agent` |
-| `2` | `allow` | `request_info` | `triage_agent` | `running / triage_agent` |
-| `2` | `allow` | `manual_review` | `human_approval` | `pending_human / human_approval` |
+| `2` | `allow` | `request_info` | `response_agent` | Response sets `waiting_user` |
+| `2` | `allow` | `manual_review` | `human_approval` | `waiting_human / human_approval` |
 
-Every human route uses the same `pending_human / human_approval` workflow state. Its cause is preserved separately: a governance escalation uses a `governance` trigger, while a policy review uses a `policy_review` trigger.
+Every human route uses the same shared-state destination. Its cause is preserved separately: a governance escalation uses a `governance` trigger, while a policy review uses a `policy_review` trigger. The standalone GCP adapter retains `pending_human`; the parent AppState uses `waiting_human`.
 
 ## 4. Policy Decision Logic
 
@@ -170,18 +178,18 @@ Governance runs in a separate Azure call and must preserve the policy evaluation
 | `forbidden_tool` | A result claims tool use, database access, or refund execution |
 | `pii_risk` | Email addresses or information explicitly belonging to another customer |
 
-A customer's uncertain order number for their own case is a policy conflict, not PII. The governance contract has only two actions:
+A customer's uncertain order number for their own case is a policy conflict, not PII. The Azure governance result has only two internal actions:
 
 1. No findings -> `allow` and route by policy decision.
-2. One or more findings -> `quarantine` and route to `human_approval`.
+2. One or more findings -> `quarantine`; the route resolver sends the case to `human_approval`.
 
-There is no `block` action. Governance does not create a separate workflow status; all human routes use `pending_human`.
+The state adapter maps internal `quarantine` to the parent contract's `block`. It does not create a second business meaning. Both represent a governance-triggered human review, and governance preserves the complete Policy result.
 
 ## 5. Technical Contracts
 
 ### 5.1 Input
 
-The source is `main_db.agent_handoffs.output_json` where `from_agent = triage_agent` and `to_agent = policy_agent`. `exact_policy_input()` removes triage-only fields and constructs this strict input:
+In the parent graph, the source is `AppState.triage_output` with matching root `trace_id` and `ticket_id`. In standalone mode, the same payload comes from `main_db.agent_handoffs.output_json` where `from_agent = triage_agent` and `to_agent = policy_agent`. `exact_policy_input()` removes Triage-only fields and constructs this strict input:
 
 <details>
 <summary>Input JSON example</summary>
@@ -295,8 +303,8 @@ Example `request_info` output:
     "missing_info_to_request": ["Provide customer_request.requested_amount."]
   },
   "handoff": {
-    "next_agent": "triage_agent",
-    "reason": "Triage must collect the missing requested amount."
+    "next_agent": "response_agent",
+    "reason": "The customer must be asked for the missing information."
   },
   "governance": {
     "semantic_drift_score": 0.0,
@@ -310,11 +318,35 @@ Example `request_info` output:
 
 `case` and `customer_request` must preserve the input. `policy_evaluation` contains matched rules and gaps; `response_guidance` contains a customer-safe summary and any missing facts to request; `handoff.next_agent` must match the routing table; and `governance` contains the drift score, interceptor action, and flags.
 
-The internal policy result also contains an evidence manifest for rule IDs, fact paths, precedent matches, and decision support. Detailed governance findings are persisted as events. Neither internal structure is added to the public output.
+The internal policy result also contains an evidence manifest for rule IDs, fact paths, precedent matches, and decision support. Detailed governance findings are persisted as events. Neither internal structure is added to the public Proposal output.
 
 The exact schemas and field constraints are defined in `models.py`; the tested complete examples are produced by `tests/factories.py`.
 
-### 5.3 Validation Repair And Failure
+### 5.3 Shared State
+
+The parent graph uses two independent state patches. Neither patch contains `next_agent` or performs a database write.
+
+| State field | Producer | Contents |
+|---|---|---|
+| `policy_decision` | Policy | `decision`, refund amount, confidence, confidence evidence, precedent evidence, and reason |
+| `policy_context` | Policy | Policy version, evaluation, response guidance, evidence manifest, and validated precedent context |
+| `policy_governance_result` | Policy Governance | Stage, `allow` or `block`, drift score, flags, and detailed findings |
+| `risk_flags` | Governance stages | Append-only stage-tagged findings |
+| `llm_usage_events` | LLM nodes | Append-only agent/stage input and output token records |
+| `llm_input_tokens` / `llm_output_tokens` | LLM nodes | Additive workflow totals |
+
+Triage and Policy Governance must use separate fields:
+
+```text
+triage_governance_result
+policy_governance_result
+```
+
+This prevents the later stage from replacing earlier governance evidence. `policy_decision.decision` is the shared-state spelling; the Proposal output adapter maps it back to `decision.type`.
+
+The parent Policy router reads only `policy_governance_result.status` and `policy_decision.decision`. It uses `routing.py`; it does not change business data.
+
+### 5.4 Validation Repair And Failure
 
 Both Azure nodes must return strict JSON. Python validates:
 
@@ -322,13 +354,15 @@ Both Azure nodes must return strict JSON. Python validates:
 2. Policy IDs, effects, evidence, and allowed fact paths.
 3. Confidence and precedent calculations.
 4. Decision precedence and refund limits.
-5. Governance preservation and routing.
+5. Governance preservation and route consistency.
 
 An invalid result receives one Azure repair call with the validation errors and validator-calculated constraints. Repair can replace only existing JSON Pointer paths; policy-confidence repair must return the complete confidence and precedent correction. Python applies only the returned values and validates the full result again.
 
-If repair remains invalid, the service records `policy_agent_failed`, sets the workflow to `failed / policy_agent`, creates no downstream handoff, and stops. There is no local reasoning, governance, routing, or persistence fallback.
+If repair remains invalid, the runtime records `policy_agent_failed`, sets the workflow to `failed / policy_agent`, creates no downstream handoff, and stops. There is no local reasoning, governance, routing, or persistence fallback.
 
-### 5.4 GCP Persistence
+### 5.5 GCP Persistence
+
+In the state-driven architecture, agent nodes never write GCP. The parent `db/pipeline_store.py` uses `policy_input_from_state()`, `policy_output_from_state()`, and `policy_usage_from_state()` to obtain the exact Proposal input, final output, and Policy-only token totals. The retained standalone service performs the same write through `cloud_db.py`.
 
 A successful trace is written in one MySQL transaction. Persistence follows this order:
 
@@ -385,7 +419,7 @@ python -m policy_agent.cli run --all
 - `--trace`: process one trace.
 - `--all`: reprocess every Triage-to-Policy handoff.
 
-All run commands call Azure and write GCP.
+These are standalone compatibility commands. They call Azure and write GCP through `cloud_db.py`. In the parent graph, the Policy nodes are invoked through `build_policy_state_nodes()` and persistence is owned by the parent pipeline.
 
 ### 6.3 Test
 
@@ -418,7 +452,8 @@ Prompts, validators, models, and tests must remain synchronized. Changing only p
 | Confidence meanings or decision branches | `_policy_instructions()`, `_confidence_expectation()`, and `_validate_decision()` in `policy_node.py` | `PolicyDecision` in `models.py`; confidence tests; README |
 | Precedent thresholds | Constants at the top of `policy_node.py` | Prompt wording, validator tests, README |
 | Governance flags | Governance types in `models.py` | `governance_node.py`, `OWASP_BY_FLAG` in `cloud_db.py`, schema if needed, tests |
-| Downstream routes | Route validators in `models.py` and `governance_node.py` | Governance prompt, `_workflow_state()` in `cloud_db.py`, downstream contracts, tests, diagrams |
+| Parent-state fields or mappings | `state_adapter.py` | Parent `app/state.py`, persistence adapter, state contract tests |
+| Downstream routes | `routing.py` | `PolicyAgentOutput` route validation, parent router, cloud workflow mapping, tests, diagrams |
 | Human approval trigger model | `_approval_trigger()` and persistence in `cloud_db.py` | `002_unified_human_approval_trigger.sql`, schema checks, reset logic, cloud tests |
 | Graph topology | `graph.py` | State contracts, `service.py`, graph tests, diagrams |
 | Azure generation or repair | `azure.py` | `.env.example` and repair tests |
@@ -428,12 +463,14 @@ Prompts, validators, models, and tests must remain synchronized. Changing only p
 File ownership is intentionally separated:
 
 - `policy_node.py`: policy, confidence, and precedent reasoning.
-- `governance_node.py`: OWASP review and route selection.
+- `governance_node.py`: OWASP review only; it cannot select a route.
 - `models.py`: strict input/output contracts and invariants.
 - `azure.py`: structured Azure generation and repair.
-- `graph.py`: LangGraph node order.
-- `service.py`: GCP-to-graph-to-GCP orchestration.
-- `cloud_db.py`: GCP schema, state, and transactions.
+- `routing.py`: the single Policy routing table and handoff reasons.
+- `state_adapter.py`: parent AppState input, Policy and Governance patches, and Proposal reconstruction.
+- `graph.py`: standalone two-node LangGraph and compatibility output assembly.
+- `service.py`: retained standalone GCP-to-graph-to-GCP orchestration.
+- `cloud_db.py`: standalone GCP schema, workflow state, and transactions.
 - `migrations/001_*.sql`: separate policy-review evidence and approval routing columns.
 - `migrations/002_*.sql`: unify human approval around one typed trigger.
 - `cli.py`: operational commands.
@@ -445,4 +482,5 @@ File ownership is intentionally separated:
 3. Python verifies structure, references, arithmetic, and branch consistency but cannot independently prove every Azure semantic judgment.
 4. `partial_refund` is supported by the contract and routing, but the current `v1.0` KB sends discretionary partial outcomes to human review.
 5. The polymorphic human-approval trigger is validated by repository logic rather than one database foreign key.
-6. Concurrency, refund execution, customer-response quality, and final human outcomes remain outside this component.
+6. The parent branch's `db/pipeline_store.py` must be wired during integration; this branch supplies the pure state contracts and retains its standalone writer.
+7. Concurrency, refund execution, customer-response quality, and final human outcomes remain outside this component.

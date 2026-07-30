@@ -987,7 +987,7 @@ def _approved_next_agent(output: PolicyAgentOutput) -> str:
         "partial_refund": "refund_agent",
         "manual_review": "refund_agent",
         "deny": "response_agent",
-        "request_info": "triage_agent",
+        "request_info": "response_agent",
     }[output.decision.type]
 
 

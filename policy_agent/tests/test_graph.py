@@ -61,12 +61,13 @@ def test_graph_has_exact_two_node_order_and_preserves_policy_result() -> None:
     assert result["usage"] == TokenUsage(input_tokens=20, output_tokens=8)
     assert result["precedent_context"].status == "empty"
     assert "confidence" not in json.dumps(GovernanceAssessment.model_json_schema())
+    assert "handoff" not in json.dumps(GovernanceAssessment.model_json_schema())
 
 
 @pytest.mark.parametrize(
     ("result_kind", "expected_decision", "expected_route"),
     [
-        ("missing", "request_info", "triage_agent"),
+        ("missing", "request_info", "response_agent"),
         ("review", "manual_review", "human_approval"),
     ],
 )
@@ -92,7 +93,7 @@ def test_policy_decisions_route_to_the_required_agent(
             policies=[make_policy("R-REVIEW-HIGH-VALUE", "requires_review")],
             comparison_decision=None,
         )
-    client = FakeAzureClient(policy_result, allow_governance(expected_route))
+    client = FakeAzureClient(policy_result, allow_governance())
 
     output = PolicyAgentOutput.model_validate(
         build_policy_agent_graph(client).invoke({"policy_input": policy_input})["policy_output"]
