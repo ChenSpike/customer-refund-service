@@ -65,7 +65,8 @@ Keep only the core workflow state.
 | `clarification_question` | `str` | Follow-up question sent back to the user | Response |
 | `order_lookup_result` | `dict` | Raw order data returned by the lookup tool | Triage, Audit |
 | `triage_output` | `dict` | Structured case payload produced by triage | Triage Governance, Policy |
-| `governance_result` | `dict` | Governance decision with allow or block result | Routers, Human Approval |
+| `triage_governance_result` | `dict` | Triage governance decision with allow or block result | Triage Router, Human Approval |
+| `policy_governance_result` | `dict` | Policy governance decision with allow or block result | Policy Router, Human Approval |
 | `risk_flags` | `dict` | Consolidated risk signals such as PII, content filter, injection, or tool misuse | Governance |
 | `policy_decision` | `dict` | Final policy decision for the refund case | Policy Governance, Routers, Downstream |
 | `policy_context` | `dict` | Supporting policy metadata such as rule version or retrieval context | Policy, Audit |
@@ -159,7 +160,7 @@ Reads:
 Writes:
 
 - `current_stage = "triage_governance"`
-- `governance_result`
+- `triage_governance_result`
 - `risk_flags`
 - `audit_trail`
 - `snapshots`
@@ -169,9 +170,9 @@ Writes:
 Typical results:
 
 - If safe:
-        - `governance_result.status = "allow"`
+        - `triage_governance_result.status = "allow"`
 - If blocked:
-        - `governance_result.status = "block"`
+        - `triage_governance_result.status = "block"`
         - `human_review_required = True`
         - `workflow_status = "waiting_human"`
 
@@ -181,14 +182,14 @@ This stage does not create business data. It only reads control state and select
 
 Reads:
 
-- `governance_result`
+- `triage_governance_result`
 - `missing_fields`
 - `user_action_required`
 - `triage_output`
 
 Routing rules:
 
-- If `governance_result.status == "block"` -> `Human Approval`
+- If `triage_governance_result.status == "block"` -> `Human Approval`
 - If `user_action_required == True` -> `Response Agent`
 - If `triage_output` is complete -> `Policy Agent`
 
@@ -234,7 +235,7 @@ Reads:
 Writes:
 
 - `current_stage = "policy_governance"`
-- `governance_result`
+- `policy_governance_result`
 - `risk_flags`
 - `audit_trail`
 - `snapshots`
@@ -244,9 +245,9 @@ Writes:
 Typical results:
 
 - If safe:
-        - `governance_result.status = "allow"`
+        - `policy_governance_result.status = "allow"`
 - If blocked:
-        - `governance_result.status = "block"`
+        - `policy_governance_result.status = "block"`
         - `human_review_required = True`
         - `workflow_status = "waiting_human"`
 
@@ -256,12 +257,12 @@ This stage reads the policy result and sends the workflow to the correct final b
 
 Reads:
 
-- `governance_result`
+- `policy_governance_result`
 - `policy_decision`
 
 Routing rules:
 
-- If `governance_result.status == "block"` -> `Human Approval`
+- If `policy_governance_result.status == "block"` -> `Human Approval`
 - If `policy_decision.decision == "approve"` -> `Refund Agent`
 - If `policy_decision.decision in {"deny", "request_info"}` -> `Response Agent`
 - If `policy_decision.decision == "manual_review"` -> `Human Approval`
@@ -351,7 +352,7 @@ This is the manual review branch for blocked or ambiguous cases.
 
 Reads:
 
-- `governance_result`
+- `policy_governance_result`
 - `policy_decision`
 - `trace_id`
 - `ticket_id`

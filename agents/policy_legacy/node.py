@@ -3,6 +3,7 @@ import json
 from tools.azure_client import client
 from tools.llm_helpers import extract_text, usage_tokens
 
+from .input_adapter import build_policy_input, missing_required_fields, request_info_result
 from .models import PolicyDecision
 from .prompts import SYSTEM_MSG, VALID_CONFIDENCE, VALID_DECISIONS
 
@@ -38,7 +39,10 @@ def _normalize_decision(raw: dict) -> PolicyDecision:
 
 
 def policy_node(state) -> dict:
-    triage_output = state["triage_output"]
+    policy_input = build_policy_input(state)
+    missing_fields = missing_required_fields(policy_input)
+    if missing_fields:
+        return request_info_result(state, missing_fields)
 
     response = client.responses.create(
         model="gpt-5.4",
@@ -46,7 +50,7 @@ def policy_node(state) -> dict:
             SYSTEM_MSG,
             {
                 "role": "user",
-                "content": json.dumps(triage_output, ensure_ascii=False),
+                "content": json.dumps(policy_input, ensure_ascii=False),
             },
         ],
         text={"format": {"type": "json_object"}},

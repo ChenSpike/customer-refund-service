@@ -4,13 +4,12 @@ from app.state import AppState
 from app.routers.policy_router import route_after_policy
 from app.routers.refund_router import route_after_refund
 from app.routers.triage_router import route_after_triage
-from agents.policy.node import policy_node
+from agents.policy.state_adapter import build_policy_state_nodes
 from agents.refund.node import refund_node
 from agents.triage.node import triage_node
 from governance.checkers import (
     check_pii_risk,
     check_semantic_drift,
-    check_tool_misuse,
 )
 from governance.node import GovernanceNode
 
@@ -67,7 +66,9 @@ def response_node(state: AppState) -> dict:
 
 
 def human_approval_node(state: AppState) -> dict:
-    governance_result = state.get("governance_result", {})
+    governance_result = state.get("policy_governance_result") or state.get(
+        "triage_governance_result"
+    ) or state.get("governance_result", {})
     policy_decision = state.get("policy_decision", {})
 
     reason = "manual_review"
@@ -86,21 +87,17 @@ def human_approval_node(state: AppState) -> dict:
 
 def build_graph():
     builder = StateGraph(AppState)
+    policy_nodes = build_policy_state_nodes()
 
     triage_governance = GovernanceNode(
         name="triage",
         checkers=[check_pii_risk, check_semantic_drift],
     )
 
-    policy_governance = GovernanceNode(
-        name="policy",
-        checkers=[check_pii_risk, check_semantic_drift, check_tool_misuse],
-    )
-
     builder.add_node("triage", triage_node)
     builder.add_node("triage_governance", triage_governance)
-    builder.add_node("policy", policy_node)
-    builder.add_node("policy_governance", policy_governance)
+    builder.add_node("policy", policy_nodes.policy_reasoning)
+    builder.add_node("policy_governance", policy_nodes.policy_governance)
     builder.add_node("refund_agent", refund_node)
     builder.add_node("response_agent", response_node)
     builder.add_node("human_approval", human_approval_node)

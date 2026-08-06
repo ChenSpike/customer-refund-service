@@ -1,15 +1,5 @@
+from agents.policy.state_adapter import route_policy_state
+
+
 def route_after_policy(state) -> str:
-    governance_result = state.get("governance_result", {})
-
-    if governance_result.get("status") == "block":
-        return "human_approval"
-
-    decision = state.get("policy_decision", {}).get("decision")
-
-    if decision == "approve":
-        return "refund_agent"
-    if decision == "deny":
-        return "response_agent"
-    if decision == "request_info":
-        return "response_agent"
-    return "human_approval"
+    return route_policy_state(state)

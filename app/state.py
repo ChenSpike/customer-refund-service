@@ -34,6 +34,8 @@ class AppState(TypedDict, total=False):
 
     # governance
     governance_result: dict
+    triage_governance_result: dict
+    policy_governance_result: dict
     risk_flags: dict
 
     # policy outputs
