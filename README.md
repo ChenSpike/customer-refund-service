@@ -416,3 +416,44 @@ C:.
 pytest tests/unit/
 pytest tests/integration/
 ```
+
+## Parent Persistence Usage
+
+Use the top-level persistence adapter in [db/pipeline_store.py](db/pipeline_store.py) when the parent graph has already produced policy state.
+
+```python
+from db.pipeline_store import persist_policy_state
+
+artifacts = persist_policy_state(state)
+print(artifacts.handoff_id)
+print(artifacts.governance_event_count)
+print(artifacts.next_agent)
+```
+
+Expected parent state inputs:
+
+- `trace_id`
+- `ticket_id`
+- `triage_output`
+- `policy_decision`
+- `policy_context`
+- `policy_governance_result`
+- `llm_usage_events`
+- optional `precedent_context`
+
+Responsibility split:
+
+- `governance/` and agent subgraphs produce typed governance results.
+- `db/pipeline_store.py` is the parent-owned DB write entrypoint for both parent graph persistence and policy standalone orchestration.
+- `db/database.py` now owns the lower-level repository implementation.
+- `agents/policy/cloud_db.py` is only a compatibility shim for older imports, not the preferred integration entrypoint.
+
+Current policy write path:
+
+```mermaid
+flowchart TD
+        A[Policy reasoning and governance finish] --> B[db.pipeline_store.PipelineStore]
+        B --> C[db.database.GCPRepository]
+        C --> D[governance_events]
+        C --> E[human_approvals / audit_log / workflow_runs]
+```

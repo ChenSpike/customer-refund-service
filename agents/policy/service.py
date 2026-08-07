@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from db.pipeline_store import PipelineStore
 from governance import GovernanceAssessment
 
 from .cloud_db import GCPRepository, RunMode
@@ -29,6 +30,7 @@ class PolicyAgentService:
     def __init__(self, repository: GCPRepository, graph: Any) -> None:
         self.repository = repository
         self.graph = graph
+        self.pipeline_store = PipelineStore(repository)
 
     @classmethod
     def from_env(cls) -> "PolicyAgentService":
@@ -52,13 +54,13 @@ class PolicyAgentService:
                 usage = TokenUsage.model_validate(result["usage"])
                 policy_usage = TokenUsage.model_validate(result["policy_usage"])
                 governance_usage = TokenUsage.model_validate(result["governance_usage"])
-                handoff_id = self.repository.persist_result(
-                    policy_input,
-                    output,
-                    policy_result,
-                    precedent_context,
-                    assessment.findings,
-                    usage,
+                handoff_id = self.pipeline_store.persist_policy_artifacts(
+                    policy_input=policy_input,
+                    policy_output=output,
+                    policy_result=policy_result,
+                    precedent_context=precedent_context,
+                    governance_assessment=assessment,
+                    usage=usage,
                 )
                 processed.append(ProcessedCase(handoff_id, output, usage, policy_usage, governance_usage))
             except Exception as error:
