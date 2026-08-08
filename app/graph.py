@@ -7,11 +7,7 @@ from app.routers.triage_router import route_after_triage
 from agents.policy.state_adapter import build_policy_state_nodes
 from agents.refund.node import refund_node
 from agents.triage.node import triage_node
-from governance.checkers import (
-    check_pii_risk,
-    check_semantic_drift,
-)
-from governance.node import GovernanceNode
+from agents.triage.governance_node import GovernanceNode as TriageGovernanceNode
 
 
 def response_node(state: AppState) -> dict:
@@ -89,10 +85,7 @@ def build_graph():
     builder = StateGraph(AppState)
     policy_nodes = build_policy_state_nodes()
 
-    triage_governance = GovernanceNode(
-        name="triage",
-        checkers=[check_pii_risk, check_semantic_drift],
-    )
+    triage_governance = TriageGovernanceNode()
 
     builder.add_node("triage", triage_node)
     builder.add_node("triage_governance", triage_governance)

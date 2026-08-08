@@ -71,6 +71,11 @@ def triage_node(state) -> dict:
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
             "awaiting_order_id": True,
+            # Declared AppState fields the router/response node key off. The router
+            # routes need-info on user_action_required and response_node builds the
+            # reply from it; awaiting_order_id alone is not declared and is dropped.
+            "user_action_required": True,
+            "missing_fields": ["order_id"],
             "clarification_question": question,
             "conversation_history": history + [user_msg, assistant_msg(question)],
         }
@@ -87,6 +92,11 @@ def triage_node(state) -> dict:
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
             "awaiting_order_id": True,
+            # Declared AppState fields the router/response node key off. The router
+            # routes need-info on user_action_required and response_node builds the
+            # reply from it; awaiting_order_id alone is not declared and is dropped.
+            "user_action_required": True,
+            "missing_fields": ["order_id"],
             "clarification_question": question,
             "conversation_history": history + [user_msg, assistant_msg(question)],
         }
