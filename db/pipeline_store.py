@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agents.policy import policy_input_from_state, policy_output_from_state, policy_usage_from_state
 from agents.policy.models import PolicyAgentInput, PolicyAgentOutput, PolicyReasoningResult, PrecedentContext, TokenUsage
 from agents.policy.state_adapter import policy_result_from_state
 from db.database import GCPRepository
@@ -29,6 +28,10 @@ class PipelineStore:
 		return cls(GCPRepository.from_env())
 
 	def persist_policy_state(self, state: dict[str, Any]) -> PolicyPersistenceArtifacts:
+		# Lazy import breaks the agents.policy -> db.pipeline_store -> agents.policy
+		# cycle (these names are only defined late in agents/policy/__init__.py).
+		from agents.policy import policy_input_from_state, policy_output_from_state
+
 		policy_input = policy_input_from_state(state)
 		policy_output = policy_output_from_state(state)
 		_policy_input, policy_result = policy_result_from_state(state)
@@ -75,6 +78,8 @@ class PipelineStore:
 		)
 
 	def _workflow_usage(self, state: dict[str, Any]) -> TokenUsage:
+		from agents.policy import policy_usage_from_state
+
 		return policy_usage_from_state(state)
 
 	def _precedent_context(self, state: dict[str, Any]) -> PrecedentContext:
