@@ -12,11 +12,17 @@ import yaml
 
 from .azure import AzureJsonClient
 from .models import (
+    GovernanceAssessment,
     PolicyAgentInput,
+    PolicyAgentOutput,
     PolicyReasoningResult,
     PrecedentContext,
     PrecedentMemoryFile,
+    Handoff,
+    TokenUsage,
 )
+from app.state import AppState
+from .routing import handoff_reason, route_policy
 
 
 POLICY_AGENT_DIR = Path(__file__).resolve().parent
@@ -112,6 +118,144 @@ class PolicyReasoningNode:
             "precedent_context": precedents,
             "policy_usage": result.usage,
         }
+
+
+class AppStatePolicyNode:
+    def __init__(self, client: AzureJsonClient) -> None:
+        self.node = PolicyReasoningNode(client)
+
+    def __call__(self, state: AppState) -> dict[str, Any]:
+        policy_input = policy_input_from_state(state)
+        result = self.node({"policy_input": policy_input})
+        policy_result: PolicyReasoningResult = result["policy_result"]
+        precedents: PrecedentContext = result["precedent_context"]
+        usage: TokenUsage = result["policy_usage"]
+        return {
+            "current_stage": "policy",
+            "policy_result": policy_result,
+            "policy_decision": {
+                "decision": policy_result.decision.type,
+                "refund_amount": policy_result.decision.refund_amount,
+                "confidence": policy_result.decision.confidence,
+                "confidence_level": policy_result.decision.confidence_level,
+                "confidence_evidence": policy_result.decision.confidence_evidence.model_dump(mode="json"),
+                "precedent_evidence": policy_result.decision.precedent_evidence.model_dump(mode="json"),
+                "reason": policy_result.decision.reason,
+            },
+            "policy_context": {
+                "policy_version_used": policy_result.case.policy_version_used,
+                "policy_evaluation": policy_result.policy_evaluation.model_dump(mode="json"),
+                "response_guidance": policy_result.response_guidance.model_dump(mode="json"),
+                "evidence_manifest": policy_result.evidence_manifest.model_dump(mode="json"),
+                "precedent_context": precedents.model_dump(mode="json"),
+            },
+            "llm_input_tokens": usage.input_tokens,
+            "llm_output_tokens": usage.output_tokens,
+            "llm_usage_events": [
+                {
+                    "agent": "policy_agent",
+                    "stage": "policy_reasoning",
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                }
+            ],
+        }
+
+
+def policy_input_from_state(state: AppState) -> PolicyAgentInput:
+    triage_output = state.get("triage_output")
+    if not isinstance(triage_output, dict):
+        raise ValueError("triage_output must be a JSON object")
+    policy_input = PolicyAgentInput.model_validate(triage_output)
+    if state.get("trace_id") != policy_input.case.trace_id:
+        raise ValueError("state trace_id must match triage_output.case.trace_id")
+    if state.get("ticket_id") != policy_input.case.ticket_id:
+        raise ValueError("state ticket_id must match triage_output.case.ticket_id")
+    return policy_input
+
+
+def policy_result_from_state(state: AppState) -> tuple[PolicyAgentInput, PolicyReasoningResult]:
+    policy_input = policy_input_from_state(state)
+    policy_decision = state.get("policy_decision")
+    policy_context = state.get("policy_context")
+    if not isinstance(policy_decision, dict):
+        raise ValueError("policy_decision must be a JSON object")
+    if not isinstance(policy_context, dict):
+        raise ValueError("policy_context must be a JSON object")
+
+    result = PolicyReasoningResult.model_validate(
+        {
+            "case": {
+                "trace_id": policy_input.case.trace_id,
+                "ticket_id": policy_input.case.ticket_id,
+                "policy_version_used": policy_context["policy_version_used"],
+            },
+            "customer_request": policy_input.customer_request.model_dump(mode="json"),
+            "policy_evaluation": policy_context["policy_evaluation"],
+            "decision": {
+                "type": policy_decision["decision"],
+                "refund_amount": policy_decision["refund_amount"],
+                "confidence": policy_decision["confidence"],
+                "confidence_level": policy_decision["confidence_level"],
+                "confidence_evidence": policy_decision["confidence_evidence"],
+                "precedent_evidence": policy_decision["precedent_evidence"],
+                "reason": policy_decision["reason"],
+            },
+            "response_guidance": policy_context["response_guidance"],
+            "evidence_manifest": policy_context["evidence_manifest"],
+        }
+    )
+    policy_context_text = load_policy_context(policy_input.case.policy_version)
+    precedents = PrecedentContext.model_validate(policy_context["precedent_context"])
+    validate_policy_result(result, policy_input, policy_context_text, precedents)
+    return policy_input, result
+
+
+def policy_output_from_state(state: AppState) -> PolicyAgentOutput:
+    _policy_input, policy_result = policy_result_from_state(state)
+    governance_result = state.get("policy_governance_result") or {}
+    findings = governance_result.get("findings", [])
+    governance = GovernanceAssessment.model_validate(
+        {
+            "governance": {
+                "semantic_drift_score": governance_result.get("semantic_drift_score", 0.0),
+                "interceptor_action": "quarantine" if governance_result.get("status") == "block" else "allow",
+                "flags": governance_result.get("flags", []),
+            },
+            "findings": findings,
+        }
+    )
+    next_agent = route_policy(policy_result.decision.type, governance_result.get("status", "block"))
+    return PolicyAgentOutput(
+        case=policy_result.case,
+        customer_request=policy_result.customer_request,
+        policy_evaluation=policy_result.policy_evaluation,
+        decision=policy_result.decision,
+        response_guidance=policy_result.response_guidance,
+        governance=governance.governance,
+        handoff=Handoff(
+            next_agent=next_agent,
+            reason=handoff_reason(policy_result.decision.type, governance_result.get("status", "block")),
+        ),
+    )
+
+
+def policy_usage_from_state(state: AppState) -> TokenUsage:
+    events = [
+        event
+        for event in state.get("llm_usage_events", [])
+        if isinstance(event, dict) and event.get("agent") == "policy_agent"
+    ]
+    stages = [event.get("stage") for event in events]
+    expected = ["policy_reasoning", "policy_governance"]
+    if sorted(stages) != sorted(expected):
+        raise ValueError(
+            "Policy Agent usage requires exactly one policy_reasoning and one policy_governance event"
+        )
+    return TokenUsage(
+        input_tokens=sum(int(event["input_tokens"]) for event in events),
+        output_tokens=sum(int(event["output_tokens"]) for event in events),
+    )
 
 
 def load_policy_context(policy_version: str) -> str:

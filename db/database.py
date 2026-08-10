@@ -16,6 +16,7 @@ from agents.policy.models import (
 	PrecedentContext,
 	TokenUsage,
 )
+from governance import GovernanceStatement
 
 
 DATABASE_NAME = "main_db"
@@ -233,6 +234,95 @@ class GCPRepository:
 			if missing:
 				raise CloudDatabaseError(f"GCP main_db schema is missing required columns: {missing}")
 			return {"required_tables": len(REQUIRED_COLUMNS)}
+		finally:
+			connection.close()
+
+	def save_governance_event_record(self, statement: GovernanceStatement) -> str:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor()
+			cursor.execute(
+				"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = %s ORDER BY created_at",
+				(statement.trace_id, statement.agent),
+			)
+			existing = [row[0] for row in cursor.fetchall()]
+			if len(existing) > 1:
+				raise CloudDatabaseError(f"{statement.trace_id}: multiple governance event rows already exist for {statement.agent}")
+			event_id = existing[0] if existing else self._next_prefixed_id(
+				cursor,
+				"governance_events",
+				"event_id",
+				"GOV-STM-",
+			)
+			owasp_category = _statement_owasp_category(statement)
+			trigger_score = _statement_trigger_score(statement)
+			interceptor_action = "block" if statement.status == "block" else "allow"
+			flags_payload = _statement_flags_payload(statement)
+			offending_content = _statement_offending_content(statement)
+			cursor.execute(
+				"""
+				INSERT INTO governance_events (
+				  event_id, trace_id, agent, owasp_category, trigger_score, interceptor_action, flags_json, offending_content
+				)
+				VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+				ON DUPLICATE KEY UPDATE
+				  owasp_category = VALUES(owasp_category),
+				  trigger_score = VALUES(trigger_score),
+				  interceptor_action = VALUES(interceptor_action),
+				  flags_json = VALUES(flags_json),
+				  offending_content = VALUES(offending_content),
+				  created_at = CURRENT_TIMESTAMP
+				""",
+				(
+					event_id,
+					statement.trace_id,
+					statement.agent,
+					owasp_category,
+					trigger_score,
+					interceptor_action,
+					json.dumps(flags_payload, ensure_ascii=False),
+					offending_content,
+				),
+			)
+			connection.commit()
+			return event_id
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			connection.close()
+
+	def get_governance_event_record(self, trace_id: str, agent: str) -> GovernanceStatement | None:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor(dictionary=True)
+			cursor.execute(
+				"""
+				SELECT trace_id, agent, interceptor_action, flags_json, created_at
+				FROM governance_events
+				WHERE trace_id = %s AND agent = %s
+				""",
+				(trace_id, agent),
+			)
+			row = cursor.fetchone()
+			if row is None:
+				return None
+			payload = json.loads(row["flags_json"]) if row["flags_json"] else {}
+			findings = []
+			if isinstance(payload, dict) and payload.get("finding"):
+				findings = [payload["finding"]]
+			status = "block" if row["interceptor_action"] in {"block", "quarantine"} else "allow"
+			return GovernanceStatement.model_validate(
+				{
+					"trace_id": row["trace_id"],
+					"agent": row["agent"],
+					"stage": row["agent"],
+					"status": status,
+					"summary": _statement_summary_from_payload(row["agent"], status, payload),
+					"findings": findings,
+					"created_at": row["created_at"],
+				}
+			)
 		finally:
 			connection.close()
 
@@ -549,6 +639,7 @@ class GCPRepository:
 			("policy_review_events", "policy_review_event_id", "POL-REV-"),
 			("governance_events", "event_id", "POL-GOV-"),
 			("human_approvals", "approval_id", "POL-APP-"),
+			("governance_events", "event_id", "GOV-STM-"),
 		}
 		if (table, column, prefix) not in allowed:
 			raise ValueError("Unsupported sequential ID target")
@@ -632,6 +723,45 @@ def _approval_trigger(trace_id: str, policy_event_id: str | None, governance_eve
 	if policy_event_id:
 		return "policy_review", policy_event_id
 	raise CloudDatabaseError(f"{trace_id}: human approval requires a governance or policy review event")
+
+
+def _statement_owasp_category(statement: GovernanceStatement) -> str:
+	if statement.findings:
+		return OWASP_BY_FLAG[statement.findings[0].flag]
+	return "ASI00"
+
+
+def _statement_trigger_score(statement: GovernanceStatement) -> float | None:
+	if not statement.findings:
+		return None
+	return statement.findings[0].score
+
+
+def _statement_flags_payload(statement: GovernanceStatement) -> dict[str, Any]:
+	payload: dict[str, Any] = {
+		"summary": statement.summary,
+		"stage": statement.stage,
+	}
+	if statement.findings:
+		payload["finding"] = statement.findings[0].model_dump(mode="json")
+		payload["governance"] = {
+			"interceptor_action": "block" if statement.status == "block" else "allow",
+			"flags": [finding.flag for finding in statement.findings],
+		}
+	return payload
+
+
+def _statement_offending_content(statement: GovernanceStatement) -> str | None:
+	for finding in statement.findings:
+		if finding.offending_content:
+			return finding.offending_content
+	return None
+
+
+def _statement_summary_from_payload(agent: str, status: str, payload: dict[str, Any]) -> str:
+	if isinstance(payload, dict) and isinstance(payload.get("summary"), str) and payload["summary"]:
+		return payload["summary"]
+	return f"{agent} governance {'blocked' if status == 'block' else 'passed'}"
 
 
 def _migration_statements(path: Path, expected: int) -> list[str]:

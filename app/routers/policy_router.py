@@ -1,5 +1,10 @@
-from agents.policy.state_adapter import route_policy_state
+from agents.policy.routing import route_policy
 
 
 def route_after_policy(state) -> str:
-    return route_policy_state(state)
+    governance = state.get("policy_governance_result") or {}
+    decision = state.get("policy_decision") or {}
+    return route_policy(
+        decision.get("decision", "manual_review"),
+        governance.get("status", "block"),
+    )

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents.policy.models import PolicyAgentInput, PolicyAgentOutput, PolicyReasoningResult, PrecedentContext, TokenUsage
-from agents.policy.state_adapter import policy_result_from_state
 from db.database import GCPRepository
 from governance import GovernanceAssessment
 
@@ -30,7 +29,7 @@ class PipelineStore:
 	def persist_policy_state(self, state: dict[str, Any]) -> PolicyPersistenceArtifacts:
 		# Lazy import breaks the agents.policy -> db.pipeline_store -> agents.policy
 		# cycle (these names are only defined late in agents/policy/__init__.py).
-		from agents.policy import policy_input_from_state, policy_output_from_state
+		from agents.policy import policy_input_from_state, policy_output_from_state, policy_result_from_state
 
 		policy_input = policy_input_from_state(state)
 		policy_output = policy_output_from_state(state)

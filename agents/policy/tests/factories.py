@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from governance import Governance, GovernanceAssessment, GovernanceFinding
 
-from policy_agent.models import (
+from agents.policy.models import (
     CaseContext,
     ConfidenceEvidence,
     CustomerRequest,

@@ -18,6 +18,7 @@ class AppState(TypedDict, total=False):
     # llm usage
     llm_input_tokens: Annotated[int, operator.add]
     llm_output_tokens: Annotated[int, operator.add]
+    llm_usage_events: Annotated[list[dict], operator.add]
 
     # conversation
     conversation_history: list
@@ -39,6 +40,7 @@ class AppState(TypedDict, total=False):
     risk_flags: dict
 
     # policy outputs
+    policy_result: dict
     policy_decision: dict
     policy_context: dict
 

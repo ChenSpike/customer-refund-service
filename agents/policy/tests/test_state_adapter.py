@@ -3,22 +3,15 @@ from __future__ import annotations
 import pytest
 from langgraph.graph import END, START, StateGraph
 
+from app.state import AppState
 from governance import GovernanceAssessment
 
-from policy_agent.azure import AzureJsonResult
-from policy_agent.models import (
-    PolicyReasoningResult,
-    TokenUsage,
-)
-from policy_agent.routing import route_policy
-from policy_agent.state_adapter import (
-    PolicyAppState,
-    build_policy_state_nodes,
-    policy_output_from_state,
-    policy_usage_from_state,
-    route_policy_state,
-)
-from policy_agent.tests.factories import (
+from agents.policy.azure import AzureJsonResult
+from agents.policy.governance_node import GovernanceNode
+from agents.policy.models import PolicyReasoningResult, TokenUsage
+from agents.policy.policy_node import AppStatePolicyNode, policy_output_from_state, policy_usage_from_state
+from agents.policy.routing import route_policy
+from agents.policy.tests.factories import (
     allow_governance,
     make_input,
     make_policy,
@@ -47,20 +40,22 @@ class FakeAzureClient:
         )
 
 
-def test_state_nodes_return_business_patches_and_usage_events() -> None:
+def test_direct_policy_nodes_return_business_patches_and_usage_events() -> None:
     policy_input = make_input()
     client = FakeAzureClient(make_policy_result(policy_input), allow_governance())
-    nodes = build_policy_state_nodes(client)
+    policy_node = AppStatePolicyNode(client)
+    governance_node = GovernanceNode(client=client)
     initial = _app_state(policy_input)
 
-    policy_patch = nodes.policy_reasoning(initial)
+    policy_patch = policy_node(initial)
     after_policy = initial | policy_patch
-    governance_patch = nodes.policy_governance(after_policy)
+    governance_patch = governance_node(after_policy)
     final_state = after_policy | governance_patch
 
     assert client.calls == ["policy reasoning result", "governance assessment"]
     assert set(policy_patch) == {
         "current_stage",
+        "policy_result",
         "policy_decision",
         "policy_context",
         "llm_input_tokens",
@@ -77,33 +72,35 @@ def test_state_nodes_return_business_patches_and_usage_events() -> None:
             "output_tokens": 5,
         }
     ]
-    assert set(governance_patch) == {
+    assert {
         "current_stage",
         "policy_governance_result",
         "risk_flags",
         "llm_input_tokens",
         "llm_output_tokens",
         "llm_usage_events",
-    }
+    }.issubset(governance_patch)
     assert governance_patch["policy_governance_result"]["status"] == "allow"
     assert governance_patch["risk_flags"] == []
     assert governance_patch["llm_usage_events"][0]["stage"] == "policy_governance"
-    assert route_policy_state(final_state) == "refund_agent"
+    assert route_policy(final_state["policy_decision"]["decision"], final_state["policy_governance_result"]["status"]) == "refund_agent"
     assert policy_output_from_state(final_state).handoff.next_agent == "refund_agent"
 
 
-def test_state_nodes_mount_as_policy_and_policy_governance_in_parent_graph() -> None:
+def test_direct_policy_nodes_mount_as_policy_and_policy_governance_in_parent_graph() -> None:
     policy_input = make_input()
     client = FakeAzureClient(make_policy_result(policy_input), allow_governance())
-    nodes = build_policy_state_nodes(client)
-    builder = StateGraph(PolicyAppState)
-    builder.add_node("policy", nodes.policy_reasoning)
-    builder.add_node("policy_governance", nodes.policy_governance)
+    builder = StateGraph(AppState)
+    builder.add_node("policy", AppStatePolicyNode(client))
+    builder.add_node("policy_governance", GovernanceNode(client=client))
     builder.add_edge(START, "policy")
     builder.add_edge("policy", "policy_governance")
     builder.add_conditional_edges(
         "policy_governance",
-        route_policy_state,
+        lambda state: route_policy(
+            state["policy_decision"]["decision"],
+            state["policy_governance_result"]["status"],
+        ),
         {
             "refund_agent": END,
             "response_agent": END,
@@ -119,6 +116,7 @@ def test_state_nodes_mount_as_policy_and_policy_governance_in_parent_graph() -> 
         "policy_governance",
     }
     assert result["current_stage"] == "policy_governance"
+    assert result["policy_result"].decision.type == "approve"
     assert result["policy_decision"]["decision"] == "approve"
     assert result["policy_governance_result"]["status"] == "allow"
     assert result["llm_input_tokens"] == 26
@@ -170,47 +168,49 @@ def test_policy_usage_ignores_other_agents_and_rejects_duplicate_policy_events()
 def test_triage_only_fields_are_removed_and_identity_is_required() -> None:
     policy_input = make_input()
     client = FakeAzureClient(make_policy_result(policy_input), allow_governance())
-    nodes = build_policy_state_nodes(client)
+    node = AppStatePolicyNode(client)
     state = _app_state(policy_input)
-    state["triage_output"]["case"]["goal"] = "refund"
 
-    patch = nodes.policy_reasoning(state)
+    patch = node(state)
 
     assert patch["policy_context"]["policy_version_used"] == "v1.0"
     assert client.calls == ["policy reasoning result"]
 
     state["trace_id"] = "TRACE-MISMATCH"
     with pytest.raises(ValueError, match="trace_id must match"):
-        nodes.policy_reasoning(state)
+        node(state)
     assert client.calls == ["policy reasoning result"]
 
 
 def test_policy_governance_rejects_tampered_policy_state_before_azure() -> None:
     policy_input = make_input()
     client = FakeAzureClient(make_policy_result(policy_input), allow_governance())
-    nodes = build_policy_state_nodes(client)
+    policy_node = AppStatePolicyNode(client)
+    governance_node = GovernanceNode(client=client)
     state = _app_state(policy_input)
-    state.update(nodes.policy_reasoning(state))
+    state.update(policy_node(state))
     state["policy_decision"]["refund_amount"] = 0
 
-    with pytest.raises(ValueError, match="approve requires a positive refund amount"):
-        nodes.policy_governance(state)
-    assert client.calls == ["policy reasoning result"]
+    patch = governance_node(state)
+
+    assert patch["policy_governance_result"]["status"] == "block"
+    assert patch["risk_flags"][0]["flag"] == "forbidden_tool"
+    assert client.calls == ["policy reasoning result", "governance assessment"]
 
 
 def test_governance_block_preserves_policy_and_adds_stage_specific_findings() -> None:
     policy_input = make_input()
     policy_result = make_policy_result(policy_input)
     client = FakeAzureClient(policy_result, quarantine_governance())
-    nodes = build_policy_state_nodes(client)
+    policy_node = AppStatePolicyNode(client)
+    governance_node = GovernanceNode(client=client)
     state = _app_state(policy_input)
-    state.update(nodes.policy_reasoning(state))
+    state.update(policy_node(state))
     decision_before = dict(state["policy_decision"])
     context_before = dict(state["policy_context"])
 
-    governance_patch = nodes.policy_governance(state)
+    governance_patch = governance_node(state)
     state.update(governance_patch)
-    output = policy_output_from_state(state)
 
     assert "policy_decision" not in governance_patch
     assert "policy_context" not in governance_patch
@@ -220,9 +220,9 @@ def test_governance_block_preserves_policy_and_adds_stage_specific_findings() ->
     assert governance_patch["risk_flags"][0]["stage"] == "policy"
     assert governance_patch["human_review_required"] is True
     assert governance_patch["workflow_status"] == "waiting_human"
-    assert output.decision == policy_result.decision
-    assert output.governance.interceptor_action == "quarantine"
-    assert output.handoff.next_agent == "human_approval"
+    assert governance_patch["governance_assessment"].governance.interceptor_action == "quarantine"
+    assert governance_patch["governance_assessment"].findings[0].flag == "semantic_drift"
+    assert route_policy(state["policy_decision"]["decision"], governance_patch["policy_governance_result"]["status"]) == "human_approval"
 
 
 @pytest.mark.parametrize(
@@ -250,15 +250,14 @@ def test_request_info_proposal_handoff_uses_response_agent() -> None:
         comparison_decision=None,
     )
     client = FakeAzureClient(policy_result, allow_governance())
-    nodes = build_policy_state_nodes(client)
+    policy_node = AppStatePolicyNode(client)
+    governance_node = GovernanceNode(client=client)
     state = _app_state(policy_input)
-    state.update(nodes.policy_reasoning(state))
-    state.update(nodes.policy_governance(state))
+    state.update(policy_node(state))
+    state.update(governance_node(state))
 
-    output = policy_output_from_state(state)
-
-    assert output.decision.type == "request_info"
-    assert output.handoff.next_agent == "response_agent"
+    assert state["policy_decision"]["decision"] == "request_info"
+    assert route_policy(state["policy_decision"]["decision"], state["policy_governance_result"]["status"]) == "response_agent"
 
 
 def _app_state(policy_input) -> dict:

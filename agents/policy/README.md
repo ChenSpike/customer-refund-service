@@ -397,15 +397,15 @@ If both event types exist, governance becomes the single approval trigger becaus
 From `customer-refund-service`:
 
 ```powershell
-python -m pip install -r policy_agent\requirements.txt
-Copy-Item policy_agent\.env.example policy_agent\.env
-python -m policy_agent.cli migrate --confirm main_db
-python -m policy_agent.cli check
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python -m agents.policy.cli migrate --confirm main_db
+python -m agents.policy.cli check
 ```
 
 `migrate` applies both Policy Agent migrations in order: `001_policy_governance_separation.sql` separates policy-review evidence from governance events, and `002_unified_human_approval_trigger.sql` replaces split approval references with the required typed trigger.
 
-Configure Azure OpenAI and GCP MySQL in the ignored `policy_agent/.env`. Existing environment variables take precedence. `AZURE_OPENAI_API_VERSION` must be `2025-03-01-preview` or later; temperature defaults to `0`.
+Configure Azure OpenAI and MySQL in the ignored root `.env`. Existing environment variables take precedence. `AZURE_OPENAI_API_VERSION` must be `2025-03-01-preview` or later; temperature defaults to `0`.
 
 ### 6.2 Run
 

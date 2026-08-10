@@ -1,13 +1,13 @@
 from langgraph.graph import END, START, StateGraph
 
+from agents.policy import build_policy_agent_graph
 from app.state import AppState
-from app.routers.policy_router import route_after_policy
 from app.routers.refund_router import route_after_refund
-from app.routers.triage_router import route_after_triage
-from agents.policy.state_adapter import build_policy_state_nodes
+from agents.policy.azure import AzureJsonClient
 from agents.refund.node import refund_node
-from agents.triage.node import triage_node
-from agents.triage.governance_node import GovernanceNode as TriageGovernanceNode
+from agents.triage import build_triage_agent_graph
+from db.backend import DatabaseGovernanceEventRepository
+from db.database import GCPRepository
 
 
 def response_node(state: AppState) -> dict:
@@ -83,42 +83,22 @@ def human_approval_node(state: AppState) -> dict:
 
 def build_graph():
     builder = StateGraph(AppState)
-    policy_nodes = build_policy_state_nodes()
+    repository = DatabaseGovernanceEventRepository(GCPRepository.from_env())
+    azure = AzureJsonClient.from_env()
+    triage_agent = build_triage_agent_graph(client=azure, event_writer=repository)
+    policy_agent = build_policy_agent_graph(azure, event_writer=repository)
 
-    triage_governance = TriageGovernanceNode()
-
-    builder.add_node("triage", triage_node)
-    builder.add_node("triage_governance", triage_governance)
-    builder.add_node("policy", policy_nodes.policy_reasoning)
-    builder.add_node("policy_governance", policy_nodes.policy_governance)
+    builder.add_node("triage_agent", triage_agent)
+    builder.add_node("policy_agent", policy_agent)
     builder.add_node("refund_agent", refund_node)
     builder.add_node("response_agent", response_node)
     builder.add_node("human_approval", human_approval_node)
 
-    builder.add_edge(START, "triage")
-    builder.add_edge("triage", "triage_governance")
-
-    builder.add_conditional_edges(
-        "triage_governance",
-        route_after_triage,
-        {
-            "policy": "policy",
-            "response_agent": "response_agent",
-            "human_approval": "human_approval",
-        },
-    )
-
-    builder.add_edge("policy", "policy_governance")
-
-    builder.add_conditional_edges(
-        "policy_governance",
-        route_after_policy,
-        {
-            "refund_agent": "refund_agent",
-            "response_agent": "response_agent",
-            "human_approval": "human_approval",
-        },
-    )
+    builder.add_edge(START, "triage_agent")
+    builder.add_edge("triage_agent", "policy_agent")
+    builder.add_edge("policy_agent", "refund_agent")
+    builder.add_edge("policy_agent", "response_agent")
+    builder.add_edge("policy_agent", "human_approval")
 
     builder.add_conditional_edges(
         "refund_agent",
