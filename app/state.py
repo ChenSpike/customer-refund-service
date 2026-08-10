@@ -32,6 +32,7 @@ class AppState(TypedDict, total=False):
     # triage outputs
     order_lookup_result: dict
     triage_output: dict
+    triage_handoff: str
 
     # governance
     governance_result: dict
@@ -43,6 +44,7 @@ class AppState(TypedDict, total=False):
     policy_result: dict
     policy_decision: dict
     policy_context: dict
+    policy_handoff: str
 
     # downstream placeholders
     refund_result: dict

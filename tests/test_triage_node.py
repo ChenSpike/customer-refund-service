@@ -8,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from agents.triage import node as triage_node_module
 from agents.triage.governance_node import GovernanceNode as TriageGovernanceNode
 from agents.triage.node import triage_node
-from app.routers.triage_router import route_after_triage
+from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from app.state import AppState
 from tests.fakes import (
     FakeAzureClient,
@@ -116,7 +116,7 @@ def _graph(monkeypatch, queue, order):
     builder.add_edge(START, "triage")
     builder.add_edge("triage", "triage_governance")
     builder.add_conditional_edges(
-        "triage_governance", route_after_triage,
+        "triage_governance", map_triage_handoff_to_parent_node,
         {"policy": END, "response_agent": END, "human_approval": END})
     return builder.compile()
 
@@ -128,7 +128,8 @@ def test_clean_order_flows_to_policy(monkeypatch):
     assert final["triage_governance_result"]["status"] == "allow"
     assert final["triage_output"]["customer_request"]["refund_reason"] == "damaged"
     assert final["llm_input_tokens"] == 150
-    assert route_after_triage(final) == "policy"
+    final["triage_handoff"] = "policy"
+    assert map_triage_handoff_to_parent_node(final) == "policy"
 
 
 def test_awaiting_routes_to_response_with_need_info_flags(monkeypatch):
@@ -138,7 +139,8 @@ def test_awaiting_routes_to_response_with_need_info_flags(monkeypatch):
     # Option A: the declared need-info field survives and drives the route.
     assert final["user_action_required"] is True
     assert final["missing_fields"] == ["order_id"]
-    assert route_after_triage(final) == "response_agent"
+    final["triage_handoff"] = "response"
+    assert map_triage_handoff_to_parent_node(final) == "response_agent"
 
 
 def test_leak_routes_to_human_approval(monkeypatch):
@@ -146,4 +148,5 @@ def test_leak_routes_to_human_approval(monkeypatch):
         {"refund_reason": "damaged", "requested_amount": None}), leaked_order())
     final = app.invoke({"user_id": "CUST-001", "message": "ORD-001 damaged"})
     assert final["triage_governance_result"]["status"] == "block"
-    assert route_after_triage(final) == "human_approval"
+    final["triage_handoff"] = "human_review"
+    assert map_triage_handoff_to_parent_node(final) == "human_approval"

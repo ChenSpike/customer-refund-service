@@ -5,20 +5,20 @@ from typing import Literal
 
 DecisionName = Literal["approve", "deny", "partial_refund", "request_info", "manual_review"]
 GovernanceStatus = Literal["allow", "block"]
-RouteName = Literal["refund_agent", "response_agent", "human_approval"]
+RouteName = Literal["refund", "response", "human_review"]
 
 
 def route_policy(decision: DecisionName, governance_status: GovernanceStatus) -> RouteName:
     """Resolve the parent-graph route without changing business data."""
 
     if governance_status == "block":
-        return "human_approval"
+        return "human_review"
     return {
-        "approve": "refund_agent",
-        "partial_refund": "refund_agent",
-        "deny": "response_agent",
-        "request_info": "response_agent",
-        "manual_review": "human_approval",
+        "approve": "refund",
+        "partial_refund": "refund",
+        "deny": "response",
+        "request_info": "response",
+        "manual_review": "human_review",
     }[decision]
 
 

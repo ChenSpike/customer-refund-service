@@ -16,7 +16,7 @@ An automated, state-driven multi-agent workflow for evaluating and processing e-
                                 [ Triage Governance ]
                                           |
                                           v
-                                  [ Triage Router ]
+                                  [ Triage Mapper ]
                                           |
                +--------------------------+--------------------------+
                | (governance block)       | (data missing)           | (allow & complete)
@@ -27,21 +27,28 @@ An automated, state-driven multi-agent workflow for evaluating and processing e-
                |                          |                [ Policy Governance ]
                |                          |                          |
                |                          |                          v
-               |                          |                  [ Policy Router ]
+               |                          |                  [ Policy Mapper ]
                |                          |                          |
                |                          |        +-----------------+-----------------+
                |                          |        | (approve)       | (deny / info)   | (block / review)
                |                          |        v                 |                 |
                |                          |  [ Refund Agent ]        |                 |
                |                          |        v                 |                 |
-               |                          |  [ Refund Router ]       |                 |
-               |                          |        |                 |                 |
-               |                          v        v                 |                 v
+               |                          |                          |                 |
+               |                          v                          |                 v
                +----------------------> [ Response Agent ] <---------+---------[ Human Approval ]
                                           |                                            
                                           v                                            
                                        [ END ] 
 ```
+
+Subgraph boundary note:
+
+- `Triage Subgraph`: `Triage Agent` -> `Triage Governance` -> `Triage Mapper`
+- `Policy Subgraph`: `Policy Agent` -> `Policy Governance` -> `Policy Mapper`
+- `Refund Agent`, `Human Approval`, and `Response Agent` stay in the parent graph.
+- The mapper inside each subgraph writes a handoff result, and the parent graph maps that handoff to the real next node.
+- After `Refund Agent`, the parent graph always continues directly to `Response Agent`.
 
 ## Core State Table
 
@@ -58,18 +65,20 @@ Keep only the core workflow state.
 | `current_stage` | `str` | Current workflow node | All stages |
 | `workflow_status` | `str` | Overall workflow status such as `running`, `waiting_user`, `waiting_human`, or `completed` | All stages |
 | `missing_fields` | `list[str]` | Required fields that are still missing | Triage, Response |
-| `user_action_required` | `bool` | Whether the workflow is waiting for user input | Triage Router, Response |
-| `human_review_required` | `bool` | Whether the case must be reviewed by a human | Governance, Policy Router |
+| `user_action_required` | `bool` | Whether the workflow is waiting for user input | Triage Mapper, Response |
+| `human_review_required` | `bool` | Whether the case must be reviewed by a human | Governance, Policy Mapper |
 | `final_outcome` | `str` | Final case result such as `approved`, `denied`, `need_info`, `refund_failed`, or `manual_review` | End stages |
 | `requested_order_id` | `str` | Order ID extracted from the user message | Triage |
 | `clarification_question` | `str` | Follow-up question sent back to the user | Response |
 | `order_lookup_result` | `dict` | Raw order data returned by the lookup tool | Triage, Audit |
 | `triage_output` | `dict` | Structured case payload produced by triage | Triage Governance, Policy |
-| `triage_governance_result` | `dict` | Triage governance decision with allow or block result | Triage Router, Human Approval |
-| `policy_governance_result` | `dict` | Policy governance decision with allow or block result | Policy Router, Human Approval |
+| `triage_handoff` | `str` | Subgraph handoff result such as `policy`, `response`, or `human_review` | Triage Mapper, Parent Graph |
+| `triage_governance_result` | `dict` | Triage governance decision with allow or block result | Triage Mapper, Human Approval |
+| `policy_governance_result` | `dict` | Policy governance decision with allow or block result | Policy Mapper, Human Approval |
 | `risk_flags` | `dict` | Consolidated risk signals such as PII, content filter, injection, or tool misuse | Governance |
-| `policy_decision` | `dict` | Final policy decision for the refund case | Policy Governance, Routers, Downstream |
+| `policy_decision` | `dict` | Final policy decision for the refund case | Policy Governance, Mappers, Downstream |
 | `policy_context` | `dict` | Supporting policy metadata such as rule version or retrieval context | Policy, Audit |
+| `policy_handoff` | `str` | Subgraph handoff result such as `refund`, `response`, or `human_review` | Policy Mapper, Parent Graph |
 | `refund_result` | `dict` | Output from the refund execution branch | Refund Agent |
 | `response_result` | `dict` | Output from the user response branch | Response Agent |
 | `human_review` | `dict` | Output from the human approval branch | Human Approval |
@@ -84,7 +93,7 @@ Removed from the core state table:
 - `case` -> use `request_context`
 - `awaiting_info` -> use `missing_fields` and `user_action_required`
 - `awaiting_order_id` -> use `missing_fields` and `user_action_required`
-- `next_agent` -> routing belongs to routers
+- `next_agent` -> routing belongs to mappers
 - `buggy_db` -> test-only, not part of core workflow state
 - `content_filter_blocked` -> use `risk_flags`
 - `injection_flag` -> use `risk_flags`
@@ -176,9 +185,9 @@ Typical results:
         - `human_review_required = True`
         - `workflow_status = "waiting_human"`
 
-### 4. Triage Router
+### 4. Triage Mapper
 
-This stage does not create business data. It only reads control state and selects the next node.
+This stage does not jump directly to parent-graph nodes. It reads control state and writes a `triage_handoff` value for the parent graph to map.
 
 Reads:
 
@@ -189,9 +198,15 @@ Reads:
 
 Routing rules:
 
-- If `triage_governance_result.status == "block"` -> `Human Approval`
-- If `user_action_required == True` -> `Response Agent`
-- If `triage_output` is complete -> `Policy Agent`
+- If `triage_governance_result.status == "block"` -> `triage_handoff = "human_review"`
+- If `user_action_required == True` -> `triage_handoff = "response"`
+- If `triage_output` is complete -> `triage_handoff = "policy"`
+
+The parent graph maps:
+
+- `policy` -> `Policy Agent`
+- `response` -> `Response Agent`
+- `human_review` -> `Human Approval`
 
 ### 5. Policy Agent
 
@@ -251,9 +266,9 @@ Typical results:
         - `human_review_required = True`
         - `workflow_status = "waiting_human"`
 
-### 7. Policy Router
+### 7. Policy Mapper
 
-This stage reads the policy result and sends the workflow to the correct final branch.
+This stage reads the policy result and writes a `policy_handoff` value for the parent graph to map.
 
 Reads:
 
@@ -262,10 +277,16 @@ Reads:
 
 Routing rules:
 
-- If `policy_governance_result.status == "block"` -> `Human Approval`
-- If `policy_decision.decision == "approve"` -> `Refund Agent`
-- If `policy_decision.decision in {"deny", "request_info"}` -> `Response Agent`
-- If `policy_decision.decision == "manual_review"` -> `Human Approval`
+- If `policy_governance_result.status == "block"` -> `policy_handoff = "human_review"`
+- If `policy_decision.decision == "approve"` -> `policy_handoff = "refund"`
+- If `policy_decision.decision in {"deny", "request_info"}` -> `policy_handoff = "response"`
+- If `policy_decision.decision == "manual_review"` -> `policy_handoff = "human_review"`
+
+The parent graph maps:
+
+- `refund` -> `Refund Agent`
+- `response` -> `Response Agent`
+- `human_review` -> `Human Approval`
 
 ### 8. Refund Agent
 
@@ -291,20 +312,7 @@ Typical results:
 - If fully approved: `final_outcome = "approved"`
 - If refund execution fails: `final_outcome = "refund_failed"`
 
-### 9. Refund Router
-
-This stage reads the refund execution result and sends the workflow to the response branch.
-
-Reads:
-
-- `refund_result`
-
-Routing rules:
-
-- If `refund_result.status == "success"` -> `Response Agent`
-- If `refund_result.status == "failed"` -> `Response Agent`
-
-### 10. Response Agent
+### 9. Response Agent
 
 This is the user-facing response branch. It is used for missing data and final business responses.
 
@@ -346,7 +354,7 @@ Typical results:
         - `final_outcome = "need_info"`
         - `workflow_status = "waiting_user"`
 
-### 11. Human Approval
+### 10. Human Approval
 
 This is the manual review branch for blocked or ambiguous cases.
 
@@ -367,52 +375,12 @@ Writes:
 
 Typical result:
 
-- The workflow stops and waits for a human reviewer to take over.
+- The workflow records the manual-review state, then returns to `Response Agent` for the user-facing message.
 
 ## Core Development Rules
 
 1. **Agents**: Return business data patches only. Never include routing fields (`next_agent`) or database calls in agent nodes.
-2. **Routers**: Read shared state and return the string key of the next target node. No business logic transformation inside routers.
+2. **Mappers**: Inside subgraphs, mappers read shared state and write a handoff value. The parent graph maps that handoff to the real next node. No business logic transformation inside mappers.
 3. **Governance**: Operates as standalone nodes (Triage Governance, Policy Governance). Runs security and compliance checks, logs audit events, and outputs `status: allow/block`.
 4. **Middlewares**: Capture execution traces, token metrics, and state snapshots asynchronously.
 5. **Tools**: Universal SDK wrappers for external APIs (Azure, DBs, RAG). Agents and governance modules must access external services via `tools/`.
-
-## Project Directory Structure
-
-```text
-C:.
-├─ agents/                # LLM reasoning nodes (State patch outputs only)
-│  ├─ triage/             # Intent recognition & order facts extraction
-│  ├─ policy/             # Refund rule evaluation & business decision
-│  ├─ refund/             # Execution layer for payment/refund processing
-│  └─ response/           # Uniform outbound text generation
-├─ app/                   # Graph orchestration & runtime control
-│  ├─ state.py            # Shared State Schema (Context, Payload, Control)
-│  ├─ graph.py            # StateGraph definition & node wiring
-│  ├─ routers/            # Conditional edges (triage_router, policy_router)
-│  └─ middlewares/        # Async tracing & observability handlers
-├─ governance/            # Security & compliance checks
-│  ├─ node.py             # Entrypoint executing configured checkers
-│  ├─ checkers.py         # Strategy implementations (Injection, PII, Rules)
-│  └─ audit_logger.py     # Structured envelope audit log writer
-├─ db/                    # Persistence layer
-│  ├─ database.py         # DB connection engine & session management
-│  ├─ pipeline_store.py   # State checkpointing & human approval persistence
-│  └─ migrations/         # SQL schema migration scripts
-├─ tools/                 # External service clients & utility functions
-│  ├─ azure_client.py     # Azure OpenAI SDK wrapper
-│  ├─ llm_helpers.py      # Structured output parser & retry wrappers
-│  ├─ order_lookup.py     # Internal OMS/CRM data retrieval
-│  └─ policy_retriever.py # RAG vector store interface
-└─ tests/                 # Unit, integration, and live tests
-```
-
-## Quick Start
-
-1. Configure environment variables in `.env`.
-2. Run unit and integration test suites:
-
-```bash
-pytest tests/unit/
-pytest tests/integration/
-```

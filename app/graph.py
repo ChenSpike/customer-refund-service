@@ -1,11 +1,12 @@
 from langgraph.graph import END, START, StateGraph
 
 from agents.policy import build_policy_agent_graph
-from app.state import AppState
-from app.routers.refund_router import route_after_refund
 from agents.policy.azure import AzureJsonClient
 from agents.refund.node import refund_node
 from agents.triage import build_triage_agent_graph
+from app.mappers.policy_mapper import map_policy_handoff_to_parent_node
+from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
+from app.state import AppState
 from db.backend import DatabaseGovernanceEventRepository
 from db.database import GCPRepository
 
@@ -95,19 +96,27 @@ def build_graph():
     builder.add_node("human_approval", human_approval_node)
 
     builder.add_edge(START, "triage_agent")
-    builder.add_edge("triage_agent", "policy_agent")
-    builder.add_edge("policy_agent", "refund_agent")
-    builder.add_edge("policy_agent", "response_agent")
-    builder.add_edge("policy_agent", "human_approval")
-
     builder.add_conditional_edges(
-        "refund_agent",
-        route_after_refund,
+        "triage_agent",
+        map_triage_handoff_to_parent_node,
         {
+            "policy": "policy_agent",
             "response_agent": "response_agent",
+            "human_approval": "human_approval",
         },
     )
+    builder.add_conditional_edges(
+        "policy_agent",
+        map_policy_handoff_to_parent_node,
+        {
+            "refund_agent": "refund_agent",
+            "response_agent": "response_agent",
+            "human_approval": "human_approval",
+        },
+    )
+
+    builder.add_edge("refund_agent", "response_agent")
+    builder.add_edge("human_approval", "response_agent")
     builder.add_edge("response_agent", END)
-    builder.add_edge("human_approval", END)
 
     return builder.compile()

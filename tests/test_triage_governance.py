@@ -2,7 +2,7 @@
 import pytest
 
 from agents.triage.governance_node import GovernanceNode, check_data_leakage
-from app.routers.triage_router import route_after_triage
+from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from governance import BaseGovernanceNode
 from tests.fakes import leaked_order, valid_order
 
@@ -100,15 +100,15 @@ def test_node_blocks_pii_and_semantic_drift_from_shared_checkers():
 # ── router reads the per-stage key ────────────────────────────────────────────
 
 @pytest.mark.parametrize("state, expected", [
-    ({"triage_governance_result": {"status": "block"}}, "human_approval"),
-    ({"user_action_required": True}, "response_agent"),
-    ({"triage_output": {"customer_request": {}}}, "policy"),
-    ({}, "response_agent"),
+    ({"triage_handoff": "human_review"}, "human_approval"),
+    ({"triage_handoff": "response"}, "response_agent"),
+    ({"triage_handoff": "policy"}, "policy"),
 ])
 def test_route_after_triage_matrix(state, expected):
-    assert route_after_triage(state) == expected
+    assert map_triage_handoff_to_parent_node(state) == expected
 
 
-def test_router_sees_block_from_node():
+def test_mapper_sees_block_from_node():
     patch = GovernanceNode()(_state(leaked_order()))
-    assert route_after_triage(patch) == "human_approval"
+    patch["triage_handoff"] = "human_review"
+    assert map_triage_handoff_to_parent_node(patch) == "human_approval"

@@ -1,7 +1,4 @@
-from .graph import build_policy_agent_graph
-from .models import PolicyAgentInput, PolicyAgentOutput
-from .service import PolicyAgentService
-from .policy_node import AppStatePolicyNode, policy_input_from_state, policy_output_from_state, policy_result_from_state, policy_usage_from_state
+from importlib import import_module
 
 __all__ = [
     "PolicyAgentInput",
@@ -14,3 +11,29 @@ __all__ = [
     "policy_result_from_state",
     "policy_usage_from_state",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"PolicyAgentInput", "PolicyAgentOutput"}:
+        module = import_module(".models", __name__)
+        return getattr(module, name)
+
+    if name in {
+        "AppStatePolicyNode",
+        "policy_input_from_state",
+        "policy_output_from_state",
+        "policy_result_from_state",
+        "policy_usage_from_state",
+    }:
+        module = import_module(".policy_node", __name__)
+        return getattr(module, name)
+
+    if name == "build_policy_agent_graph":
+        module = import_module(".graph", __name__)
+        return getattr(module, name)
+
+    if name == "PolicyAgentService":
+        module = import_module(".service", __name__)
+        return getattr(module, name)
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

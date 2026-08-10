@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.routers.policy_router import route_after_policy
+from app.mappers.policy_mapper import resolve_policy_handoff
 from app.state import AppState
 from governance import GovernanceEventWriter
 
 from .azure import AzureJsonClient
 from .governance_node import GovernanceNode
 from .policy_node import AppStatePolicyNode
+
+
+def policy_handoff_node(state: AppState) -> dict:
+    return {"policy_handoff": resolve_policy_handoff(state)}
 
 
 def build_policy_agent_graph(
@@ -25,15 +29,9 @@ def build_policy_agent_graph(
 
     builder.add_node("policy", policy_node)
     builder.add_node("policy_governance", policy_governance_node)
+    builder.add_node("policy_handoff", policy_handoff_node)
     builder.add_edge(START, "policy")
     builder.add_edge("policy", "policy_governance")
-    builder.add_conditional_edges(
-        "policy_governance",
-        route_after_policy,
-        {
-            "refund_agent": END,
-            "response_agent": END,
-            "human_approval": END,
-        },
-    )
+    builder.add_edge("policy_governance", "policy_handoff")
+    builder.add_edge("policy_handoff", END)
     return builder.compile(name="policy_agent")

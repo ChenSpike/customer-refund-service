@@ -344,7 +344,7 @@ policy_governance_result
 
 This prevents the later stage from replacing earlier governance evidence. `policy_decision.decision` is the shared-state spelling; the Proposal output adapter maps it back to `decision.type`.
 
-The parent Policy router reads only `policy_governance_result.status` and `policy_decision.decision`. It uses `routing.py`; it does not change business data.
+The parent Policy mapper reads only `policy_handoff` and maps it to the parent node. The policy handoff itself is computed from `policy_governance_result.status` and `policy_decision.decision` via `routing.py`; the mapper does not change business data.
 
 ### 5.4 Validation Repair And Failure
 
