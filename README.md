@@ -29,6 +29,9 @@ An automated, state-driven multi-agent workflow for evaluating and processing e-
                |                          |                          v
                |                          |                  [ Policy Handoff ]
                |                          |                          |
+               |                          |                          v
+               |                          |               [ Policy Persistence ]
+               |                          |                          |
                |                          |        +-----------------+-----------------+
                |                          |        | (approve)       | (deny / info)   | (block / review)
                |                          |        v                 |                 |
@@ -46,9 +49,10 @@ Subgraph boundary note:
 
 - `Triage Subgraph`: `Triage Agent` -> `Triage Governance` -> `Triage Handoff`
 - `Policy Subgraph`: `Policy Agent` -> `Policy Governance` -> `Policy Handoff`
-- `Refund Agent`, `Human Approval`, and `Response Agent` stay in the parent graph.
-- Inside each subgraph, the handoff step writes a handoff result, and the parent graph mapper maps that handoff to the real next node.
+- `Policy Persistence`, `Refund Agent`, `Human Approval`, and `Response Agent` stay in the parent graph.
+- Inside each subgraph, the handoff step writes a semantic handoff result. Policy persistence completes before the parent mapper selects the real next node.
 - After `Refund Agent`, the parent graph always continues directly to `Response Agent`.
+- The Policy subgraph receives a narrow JSON input so additive parent token events and risk flags are not counted twice.
 
 ## Core State Table
 
@@ -75,10 +79,12 @@ Keep only the core workflow state.
 | `triage_handoff` | `str` | Subgraph handoff result such as `policy`, `response`, or `human_review` | Triage Handoff, Parent Graph |
 | `triage_governance_result` | `dict` | Triage governance decision with allow or block result | Triage Handoff, Human Approval |
 | `policy_governance_result` | `dict` | Policy governance decision with allow or block result | Policy Handoff, Human Approval |
-| `risk_flags` | `dict` | Consolidated risk signals such as PII, content filter, injection, or tool misuse | Governance |
+| `risk_flags` | `Annotated[list[dict], operator.add]` | Append-only, stage-tagged risk findings | Governance |
+| `policy_result` | `dict` | Complete validated Policy reasoning result as JSON | Policy, Governance, Persistence |
 | `policy_decision` | `dict` | Final policy decision for the refund case | Policy Governance, Mappers, Downstream |
 | `policy_context` | `dict` | Supporting policy metadata such as rule version or retrieval context | Policy, Audit |
 | `policy_handoff` | `str` | Subgraph handoff result such as `refund`, `response`, or `human_review` | Policy Handoff, Parent Graph |
+| `policy_persistence_result` | `dict` | Persisted handoff ID, downstream agent, and event counts | Policy Persistence |
 | `refund_result` | `dict` | Output from the refund execution branch | Refund Agent |
 | `response_result` | `dict` | Output from the user response branch | Response Agent |
 | `human_review` | `dict` | Output from the human approval branch | Human Approval |
@@ -202,7 +208,7 @@ Routing rules:
 - If `user_action_required == True` -> `triage_handoff = "response"`
 - If `triage_output` is complete -> `triage_handoff = "policy"`
 
-The parent graph maps:
+After Policy persistence succeeds, the parent graph maps:
 
 - `policy` -> `Policy Agent`
 - `response` -> `Response Agent`
@@ -288,7 +294,11 @@ The parent graph maps:
 - `response` -> `Response Agent`
 - `human_review` -> `Human Approval`
 
-### 8. Refund Agent
+### 8. Policy Persistence
+
+This parent node reconstructs and revalidates the JSON Policy state, then writes the handoff, policy-review or OWASP events, typed human approval, audit row, workflow status, and Policy token totals in one GCP transaction. A write failure stops routing. The mapper routes from the persisted `next_agent` and rejects any disagreement with the subgraph handoff.
+
+### 9. Refund Agent
 
 This is the execution branch for approved refund outcomes.
 
@@ -312,7 +322,7 @@ Typical results:
 - If fully approved: `final_outcome = "approved"`
 - If refund execution fails: `final_outcome = "refund_failed"`
 
-### 9. Response Agent
+### 10. Response Agent
 
 This is the user-facing response branch. It is used for missing data and final business responses.
 
@@ -354,7 +364,7 @@ Typical results:
         - `final_outcome = "need_info"`
         - `workflow_status = "waiting_user"`
 
-### 10. Human Approval
+### 11. Human Approval
 
 This is the manual review branch for blocked or ambiguous cases.
 
@@ -379,8 +389,9 @@ Typical result:
 
 ## Core Development Rules
 
-1. **Agents**: Return business data patches only. Never include routing fields (`next_agent`) or database calls in agent nodes.
+1. **Agents**: Return JSON-serializable business data patches only. Never include routing fields (`next_agent`) or database calls in agent nodes.
 2. **Handoff and mapping**: Inside subgraphs, the handoff step reads shared state and writes a handoff value. The parent graph mapper maps that handoff to the real next node. No business logic transformation happens in the parent mapper.
-3. **Governance**: Operates as standalone nodes (Triage Governance, Policy Governance). Runs security and compliance checks, logs audit events, and outputs `status: allow/block`.
-4. **Middlewares**: Capture execution traces, token metrics, and state snapshots asynchronously.
-5. **Tools**: Universal SDK wrappers for external APIs (Azure, DBs, RAG). Agents and governance modules must access external services via `tools/`.
+3. **Governance**: Operates as standalone nodes. Policy Governance emits OWASP findings only and never rewrites the Policy decision or confidence.
+4. **Persistence**: The parent `policy_persistence` node owns the single transactional Policy write and runs before downstream routing.
+5. **Middlewares**: Capture execution traces, token metrics, and state snapshots asynchronously.
+6. **Tools**: Universal SDK wrappers for external APIs (Azure, DBs, RAG). Agents and governance modules must access external services via `tools/`.

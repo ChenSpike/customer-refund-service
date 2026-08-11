@@ -129,7 +129,10 @@ class GovernanceNode(BaseGovernanceNode):
         findings = [checker(state) for checker in self.checkers]
         deterministic_result = build_check_result_payload(self.name, findings)
         if self.reviewer is None:
-            patch = {"triage_governance_result": deterministic_result}
+            patch = {
+                "triage_governance_result": deterministic_result,
+                "risk_flags": _risk_flags_from_checks(findings),
+            }
             if self.event_writer is not None:
                 statement = build_statement_from_check_results(
                     trace_id=state.get("trace_id", "unknown"),
@@ -153,9 +156,21 @@ class GovernanceNode(BaseGovernanceNode):
 
         patch = {
             "current_stage": "triage_governance",
-            "governance_assessment": assessment,
-            "governance_usage": review.usage,
             "triage_governance_result": result,
+            "risk_flags": [
+                *_risk_flags_from_checks(blocked_deterministic),
+                *[
+                    {
+                        "stage": "triage",
+                        "flag": finding.flag,
+                        "score": finding.score,
+                        "detail": finding.detail,
+                        "offending_content": finding.offending_content,
+                        "source": finding.source,
+                    }
+                    for finding in assessment.findings
+                ],
+            ],
             "llm_input_tokens": review.usage.input_tokens,
             "llm_output_tokens": review.usage.output_tokens,
             "llm_usage_events": [
@@ -186,6 +201,21 @@ class GovernanceNode(BaseGovernanceNode):
             patch["governance_event_id"] = self.event_writer.save_event(statement)
 
         return patch
+
+
+def _risk_flags_from_checks(findings) -> list[dict[str, Any]]:
+    return [
+        {
+            "stage": "triage",
+            "flag": finding.name,
+            "score": finding.evidence.get("score"),
+            "detail": finding.detail,
+            "offending_content": finding.evidence.get("offending_content"),
+            "source": finding.source,
+        }
+        for finding in findings
+        if finding.status == "block"
+    ]
 
 
 class AzureTriageGovernanceReviewer:

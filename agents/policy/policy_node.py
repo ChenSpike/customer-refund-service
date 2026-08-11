@@ -20,9 +20,10 @@ from .models import (
     PrecedentMemoryFile,
     Handoff,
     TokenUsage,
+    exact_policy_input,
 )
 from app.state import AppState
-from .routing import handoff_reason, route_policy
+from .routing import handoff_reason, parent_agent_for_route, route_policy
 
 
 POLICY_AGENT_DIR = Path(__file__).resolve().parent
@@ -88,6 +89,13 @@ class _ConfidenceExpectation:
     precedent: _PrecedentExpectation
 
 
+@dataclass(frozen=True)
+class ReconstructedPolicyState:
+    policy_input: PolicyAgentInput
+    policy_result: PolicyReasoningResult
+    precedent_context: PrecedentContext
+
+
 class PolicyReasoningNode:
     """Azure refund-policy reasoning with one discrete confidence result."""
 
@@ -132,7 +140,7 @@ class AppStatePolicyNode:
         usage: TokenUsage = result["policy_usage"]
         return {
             "current_stage": "policy",
-            "policy_result": policy_result,
+            "policy_result": policy_result.model_dump(mode="json"),
             "policy_decision": {
                 "decision": policy_result.decision.type,
                 "refund_amount": policy_result.decision.refund_amount,
@@ -166,7 +174,7 @@ def policy_input_from_state(state: AppState) -> PolicyAgentInput:
     triage_output = state.get("triage_output")
     if not isinstance(triage_output, dict):
         raise ValueError("triage_output must be a JSON object")
-    policy_input = PolicyAgentInput.model_validate(triage_output)
+    policy_input = exact_policy_input(triage_output)
     if state.get("trace_id") != policy_input.case.trace_id:
         raise ValueError("state trace_id must match triage_output.case.trace_id")
     if state.get("ticket_id") != policy_input.case.ticket_id:
@@ -174,8 +182,9 @@ def policy_input_from_state(state: AppState) -> PolicyAgentInput:
     return policy_input
 
 
-def policy_result_from_state(state: AppState) -> tuple[PolicyAgentInput, PolicyReasoningResult]:
+def reconstruct_policy_state(state: AppState) -> ReconstructedPolicyState:
     policy_input = policy_input_from_state(state)
+    policy_result_payload = _json_object(state, "policy_result")
     policy_decision = state.get("policy_decision")
     policy_context = state.get("policy_context")
     if not isinstance(policy_decision, dict):
@@ -183,7 +192,32 @@ def policy_result_from_state(state: AppState) -> tuple[PolicyAgentInput, PolicyR
     if not isinstance(policy_context, dict):
         raise ValueError("policy_context must be a JSON object")
 
-    result = PolicyReasoningResult.model_validate(
+    _require_exact_keys(
+        policy_decision,
+        "policy_decision",
+        {
+            "decision",
+            "refund_amount",
+            "confidence",
+            "confidence_level",
+            "confidence_evidence",
+            "precedent_evidence",
+            "reason",
+        },
+    )
+    _require_exact_keys(
+        policy_context,
+        "policy_context",
+        {
+            "policy_version_used",
+            "policy_evaluation",
+            "response_guidance",
+            "evidence_manifest",
+            "precedent_context",
+        },
+    )
+
+    projected_result = PolicyReasoningResult.model_validate(
         {
             "case": {
                 "trace_id": policy_input.case.trace_id,
@@ -205,15 +239,37 @@ def policy_result_from_state(state: AppState) -> tuple[PolicyAgentInput, PolicyR
             "evidence_manifest": policy_context["evidence_manifest"],
         }
     )
+    policy_result = PolicyReasoningResult.model_validate(policy_result_payload)
+    if policy_result.model_dump(mode="json") != projected_result.model_dump(mode="json"):
+        raise ValueError("policy_result disagrees with policy_decision or policy_context projections")
+
     policy_context_text = load_policy_context(policy_input.case.policy_version)
     precedents = PrecedentContext.model_validate(policy_context["precedent_context"])
-    validate_policy_result(result, policy_input, policy_context_text, precedents)
-    return policy_input, result
+    validate_policy_result(policy_result, policy_input, policy_context_text, precedents)
+    return ReconstructedPolicyState(policy_input, policy_result, precedents)
 
 
-def policy_output_from_state(state: AppState) -> PolicyAgentOutput:
-    _policy_input, policy_result = policy_result_from_state(state)
-    governance_result = state.get("policy_governance_result") or {}
+def policy_result_from_state(state: AppState) -> tuple[PolicyAgentInput, PolicyReasoningResult]:
+    reconstructed = reconstruct_policy_state(state)
+    return reconstructed.policy_input, reconstructed.policy_result
+
+
+def policy_output_from_state(
+    state: AppState,
+    reconstructed: ReconstructedPolicyState | None = None,
+) -> PolicyAgentOutput:
+    reconstructed = reconstructed or reconstruct_policy_state(state)
+    policy_result = reconstructed.policy_result
+    governance_result = _json_object(state, "policy_governance_result")
+    _require_exact_keys(
+        governance_result,
+        "policy_governance_result",
+        {"stage", "status", "semantic_drift_score", "flags", "findings"},
+    )
+    if governance_result["stage"] != "policy":
+        raise ValueError("policy_governance_result.stage must be policy")
+    if governance_result["status"] not in {"allow", "block"}:
+        raise ValueError("policy_governance_result.status must be allow or block")
     findings = governance_result.get("findings", [])
     governance = GovernanceAssessment.model_validate(
         {
@@ -229,12 +285,8 @@ def policy_output_from_state(state: AppState) -> PolicyAgentOutput:
         policy_result.decision.type,
         governance_result.get("status", "block"),
     )
-    next_agent = {
-        "refund": "refund_agent",
-        "response": "response_agent",
-        "human_review": "human_approval",
-    }[handoff]
-    return PolicyAgentOutput(
+    next_agent = parent_agent_for_route(handoff)
+    output = PolicyAgentOutput(
         case=policy_result.case,
         customer_request=policy_result.customer_request,
         policy_evaluation=policy_result.policy_evaluation,
@@ -246,6 +298,23 @@ def policy_output_from_state(state: AppState) -> PolicyAgentOutput:
             reason=handoff_reason(policy_result.decision.type, governance_result.get("status", "block")),
         ),
     )
+    preserved = (
+        output.case.model_dump(mode="json"),
+        output.customer_request.model_dump(mode="json"),
+        output.policy_evaluation.model_dump(mode="json"),
+        output.decision.model_dump(mode="json"),
+        output.response_guidance.model_dump(mode="json"),
+    )
+    expected = (
+        policy_result.case.model_dump(mode="json"),
+        policy_result.customer_request.model_dump(mode="json"),
+        policy_result.policy_evaluation.model_dump(mode="json"),
+        policy_result.decision.model_dump(mode="json"),
+        policy_result.response_guidance.model_dump(mode="json"),
+    )
+    if preserved != expected:
+        raise ValueError("output assembly must preserve the complete policy reasoning result")
+    return output
 
 
 def policy_usage_from_state(state: AppState) -> TokenUsage:
@@ -264,6 +333,37 @@ def policy_usage_from_state(state: AppState) -> TokenUsage:
         input_tokens=sum(int(event["input_tokens"]) for event in events),
         output_tokens=sum(int(event["output_tokens"]) for event in events),
     )
+
+
+def policy_stage_usage_from_state(state: AppState, stage: str) -> TokenUsage:
+    events = [
+        event
+        for event in state.get("llm_usage_events", [])
+        if isinstance(event, dict)
+        and event.get("agent") == "policy_agent"
+        and event.get("stage") == stage
+    ]
+    if len(events) != 1:
+        raise ValueError(f"Policy Agent usage requires exactly one {stage} event")
+    return TokenUsage(
+        input_tokens=int(events[0]["input_tokens"]),
+        output_tokens=int(events[0]["output_tokens"]),
+    )
+
+
+def _json_object(state: AppState, name: str) -> dict[str, Any]:
+    value = state.get(name)
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return value
+
+
+def _require_exact_keys(value: dict[str, Any], name: str, expected: set[str]) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise ValueError(f"{name} keys mismatch; missing={missing}, extra={extra}")
 
 
 def load_policy_context(policy_version: str) -> str:

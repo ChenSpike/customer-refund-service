@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 import yaml
 
-from policy_agent.policy_node import load_policy_context, load_precedent_context
+from agents.policy.policy_node import load_policy_context, load_precedent_context
 
 
 def _record(index: int = 1) -> dict:

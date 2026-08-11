@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from policy_agent.models import PolicyDecision, PolicyGapOrConflict
-from policy_agent.policy_node import load_policy_context, validate_policy_result
-from policy_agent.tests.factories import (
+from agents.policy.models import PolicyDecision, PolicyGapOrConflict
+from agents.policy.policy_node import load_policy_context, validate_policy_result
+from agents.policy.tests.factories import (
     make_input,
     make_match,
     make_policy,

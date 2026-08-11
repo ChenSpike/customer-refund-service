@@ -233,7 +233,49 @@ class GCPRepository:
 			}
 			if missing:
 				raise CloudDatabaseError(f"GCP main_db schema is missing required columns: {missing}")
-			return {"required_tables": len(REQUIRED_COLUMNS)}
+			if "policy_review_event_id" in actual.get("human_approvals", set()):
+				raise CloudDatabaseError(
+					"GCP main_db still has the legacy human_approvals.policy_review_event_id column"
+				)
+			cursor.execute(
+				"""
+				SELECT COLUMN_NAME, IS_NULLABLE
+				FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'human_approvals'
+				  AND COLUMN_NAME IN ('triggering_event_id', 'triggering_event_type')
+				""",
+				(DATABASE_NAME,),
+			)
+			nullable_triggers = [
+				name for name, nullable in cursor.fetchall() if nullable != "NO"
+			]
+			if nullable_triggers:
+				raise CloudDatabaseError(
+					f"Human approval trigger columns must be required: {nullable_triggers}"
+				)
+			legacy_constraints = [
+				name
+				for name in ("fk_human_approvals_event", "fk_human_policy_review")
+				if self._constraint_exists(cursor, "human_approvals", name)
+			]
+			if legacy_constraints:
+				raise CloudDatabaseError(
+					f"Legacy single-parent approval constraints remain: {legacy_constraints}"
+				)
+			cursor.execute(
+				"""
+				SELECT COUNT(*), SUM(trace_id REGEXP %s)
+				FROM agent_handoffs
+				WHERE from_agent = 'triage_agent' AND to_agent = 'policy_agent'
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			all_sources, benchmark_sources = cursor.fetchone()
+			return {
+				"source_handoffs": int(benchmark_sources or 0),
+				"all_source_handoffs": int(all_sources),
+				"required_tables": len(REQUIRED_COLUMNS),
+			}
 		finally:
 			connection.close()
 
@@ -411,13 +453,296 @@ class GCPRepository:
 				""",
 				(workflow_status, current_agent, output.case.policy_version_used, trace_id),
 			)
-			if cursor.rowcount != 1:
-				raise CloudDatabaseError(f"{trace_id}: workflow_runs row was not updated")
+			_require_workflow_row(cursor, trace_id)
 			connection.commit()
 			return handoff_id
 		except Exception:
 			connection.rollback()
 			raise
+		finally:
+			connection.close()
+
+	def reset_policy_agent_data(self) -> dict[str, int]:
+		"""Return the 20 benchmark workflows to their Triage-to-Policy baseline."""
+
+		connection = self._connect()
+		try:
+			connection.start_transaction()
+			cursor = connection.cursor()
+			cursor.execute(
+				"""
+				SELECT COUNT(*) FROM agent_handoffs
+				WHERE from_agent = 'triage_agent' AND to_agent = 'policy_agent'
+				  AND trace_id REGEXP %s
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			counts = {"source_handoffs": int(cursor.fetchone()[0])}
+
+			deletions = (
+				(
+					"human_approvals",
+					"""
+					DELETE approvals FROM human_approvals approvals
+					JOIN agent_handoffs source ON source.trace_id = approvals.trace_id
+					WHERE source.from_agent = 'triage_agent'
+					  AND source.to_agent = 'policy_agent'
+					  AND source.trace_id REGEXP %s
+					  AND approvals.approval_id LIKE 'POL-APP-%%'
+					""",
+				),
+				(
+					"policy_review_events",
+					"""
+					DELETE reviews FROM policy_review_events reviews
+					JOIN agent_handoffs source ON source.trace_id = reviews.trace_id
+					WHERE source.from_agent = 'triage_agent'
+					  AND source.to_agent = 'policy_agent'
+					  AND source.trace_id REGEXP %s
+					""",
+				),
+				(
+					"governance_events",
+					"""
+					DELETE events FROM governance_events events
+					JOIN agent_handoffs source ON source.trace_id = events.trace_id
+					WHERE source.from_agent = 'triage_agent'
+					  AND source.to_agent = 'policy_agent'
+					  AND source.trace_id REGEXP %s
+					  AND events.agent = 'policy_agent'
+					""",
+				),
+				(
+					"audit_log",
+					"""
+					DELETE logs FROM audit_log logs
+					JOIN agent_handoffs source ON source.trace_id = logs.trace_id
+					WHERE source.from_agent = 'triage_agent'
+					  AND source.to_agent = 'policy_agent'
+					  AND source.trace_id REGEXP %s
+					  AND logs.agent = 'policy_agent'
+					""",
+				),
+				(
+					"policy_handoffs",
+					"""
+					DELETE target FROM agent_handoffs target
+					JOIN agent_handoffs source ON source.trace_id = target.trace_id
+					WHERE source.from_agent = 'triage_agent'
+					  AND source.to_agent = 'policy_agent'
+					  AND source.trace_id REGEXP %s
+					  AND target.from_agent = 'policy_agent'
+					""",
+				),
+			)
+			for name, statement in deletions:
+				cursor.execute(statement, (BENCHMARK_TRACE_PATTERN,))
+				counts[name] = cursor.rowcount
+
+			cursor.execute(
+				"""
+				UPDATE workflow_runs workflow
+				JOIN agent_handoffs source ON source.trace_id = workflow.trace_id
+				SET workflow.status = 'running',
+				    workflow.current_agent = 'policy_agent',
+				    workflow.completed_at = NULL,
+				    workflow.updated_at = CURRENT_TIMESTAMP
+				WHERE source.from_agent = 'triage_agent'
+				  AND source.to_agent = 'policy_agent'
+				  AND source.trace_id REGEXP %s
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			counts["workflow_runs"] = cursor.rowcount
+			connection.commit()
+			return counts
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			connection.close()
+
+	def policy_artifact_ids(self) -> dict[str, list[Any]]:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor()
+			queries = {
+				"source_handoffs": """
+					SELECT handoff_id FROM agent_handoffs
+					WHERE from_agent = 'triage_agent' AND to_agent = 'policy_agent'
+					  AND trace_id REGEXP %s
+					ORDER BY CAST(handoff_id AS UNSIGNED)
+				""",
+				"policy_handoffs": """
+					SELECT handoff_id FROM agent_handoffs
+					WHERE from_agent = 'policy_agent' AND trace_id REGEXP %s
+					ORDER BY CAST(handoff_id AS UNSIGNED)
+				""",
+				"policy_review_events": """
+					SELECT policy_review_event_id FROM policy_review_events
+					WHERE trace_id REGEXP %s
+					ORDER BY created_at, policy_review_event_id
+				""",
+				"governance_events": """
+					SELECT event_id FROM governance_events
+					WHERE agent = 'policy_agent' AND trace_id REGEXP %s
+					ORDER BY created_at, event_id
+				""",
+				"human_approvals": """
+					SELECT approval_id FROM human_approvals
+					WHERE approval_id LIKE 'POL-APP-%%' AND trace_id REGEXP %s
+					ORDER BY created_at, approval_id
+				""",
+			}
+			result: dict[str, list[Any]] = {}
+			for name, query in queries.items():
+				cursor.execute(query, (BENCHMARK_TRACE_PATTERN,))
+				result[name] = [row[0] for row in cursor.fetchall()]
+			cursor.execute(
+				"""
+				SELECT log_id, event_type FROM audit_log
+				WHERE agent = 'policy_agent' AND trace_id REGEXP %s
+				ORDER BY log_id
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			result["audit_log"] = list(cursor.fetchall())
+			return result
+		finally:
+			connection.close()
+
+	def fetch_case_records(self) -> list[CloudCaseRecord]:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor(dictionary=True)
+			cursor.execute(
+				"""
+				SELECT
+				  p.handoff_id, p.trace_id, p.ticket_id, p.to_agent,
+				  p.input_json, p.output_json, p.input_tokens, p.output_tokens,
+				  COALESCE(SUM(all_h.input_tokens), 0) AS workflow_input_tokens,
+				  COALESCE(SUM(all_h.output_tokens), 0) AS workflow_output_tokens,
+				  w.status AS workflow_status, w.current_agent
+				FROM agent_handoffs p
+				JOIN workflow_runs w ON w.trace_id = p.trace_id
+				JOIN agent_handoffs all_h ON all_h.trace_id = p.trace_id
+				WHERE p.from_agent = 'policy_agent' AND p.trace_id REGEXP %s
+				GROUP BY
+				  p.handoff_id, p.trace_id, p.ticket_id, p.to_agent,
+				  p.input_json, p.output_json, p.input_tokens, p.output_tokens,
+				  w.status, w.current_agent
+				ORDER BY p.trace_id
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			records = []
+			for row in cursor.fetchall():
+				row["input_json"] = json.loads(row["input_json"])
+				row["output_json"] = json.loads(row["output_json"])
+				for key in (
+					"input_tokens",
+					"output_tokens",
+					"workflow_input_tokens",
+					"workflow_output_tokens",
+				):
+					row[key] = int(row[key])
+				records.append(CloudCaseRecord(**row))
+			return records
+		finally:
+			connection.close()
+
+	def fetch_review_records(self) -> dict[str, list[dict[str, Any]]]:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor(dictionary=True)
+			cursor.execute(
+				"""
+				SELECT * FROM policy_review_events
+				WHERE trace_id REGEXP %s
+				ORDER BY policy_review_event_id
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			policy = cursor.fetchall()
+			for row in policy:
+				row["policy_ids_json"] = json.loads(row["policy_ids_json"])
+				row["evidence_json"] = json.loads(row["evidence_json"])
+			cursor.execute(
+				"""
+				SELECT * FROM governance_events
+				WHERE agent = 'policy_agent' AND trace_id REGEXP %s
+				ORDER BY event_id
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			governance = cursor.fetchall()
+			for row in governance:
+				row["flags_json"] = json.loads(row["flags_json"])
+			cursor.execute(
+				"""
+				SELECT * FROM human_approvals
+				WHERE approval_id LIKE 'POL-APP-%%' AND trace_id REGEXP %s
+				ORDER BY approval_id
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			approvals = cursor.fetchall()
+			for row in approvals:
+				row["notes"] = json.loads(row["notes"]) if row["notes"] else None
+			return {
+				"policy": policy,
+				"governance": governance,
+				"approvals": approvals,
+			}
+		finally:
+			connection.close()
+
+	def integrity_counts(self) -> dict[str, int]:
+		connection = self._connect()
+		try:
+			cursor = connection.cursor()
+			result: dict[str, int] = {}
+			for table in (
+				"audit_log",
+				"governance_events",
+				"policy_review_events",
+				"human_approvals",
+			):
+				cursor.execute(
+					f"""
+					SELECT COUNT(*) FROM {table} child
+					LEFT JOIN workflow_runs workflow ON workflow.trace_id = child.trace_id
+					WHERE workflow.trace_id IS NULL
+					"""
+				)
+				result[f"orphan_{table}"] = int(cursor.fetchone()[0])
+			cursor.execute(
+				"""
+				SELECT COUNT(*) FROM human_approvals
+				WHERE approval_id LIKE 'POL-APP-%%' AND trace_id REGEXP %s
+				""",
+				(BENCHMARK_TRACE_PATTERN,),
+			)
+			result["policy_agent_human_approvals"] = int(cursor.fetchone()[0])
+			cursor.execute(
+				"""
+				SELECT COUNT(*)
+				FROM human_approvals approvals
+				LEFT JOIN governance_events governance
+				  ON approvals.triggering_event_type = 'governance'
+				 AND approvals.triggering_event_id = governance.event_id
+				LEFT JOIN policy_review_events reviews
+				  ON approvals.triggering_event_type = 'policy_review'
+				 AND approvals.triggering_event_id = reviews.policy_review_event_id
+				WHERE (approvals.triggering_event_type = 'governance'
+				       AND governance.event_id IS NULL)
+				   OR (approvals.triggering_event_type = 'policy_review'
+				       AND reviews.policy_review_event_id IS NULL)
+				   OR approvals.triggering_event_type NOT IN ('governance', 'policy_review')
+				"""
+			)
+			result["orphan_human_approval_trigger"] = int(cursor.fetchone()[0])
+			return result
 		finally:
 			connection.close()
 
@@ -712,7 +1037,7 @@ def _workflow_state(output: PolicyAgentOutput) -> tuple[str, str]:
 
 
 def _approved_next_agent(output: PolicyAgentOutput) -> str:
-	if output.decision.type in {"approve", "partial_refund"}:
+	if output.decision.type in {"approve", "partial_refund", "manual_review"}:
 		return "refund_agent"
 	return "response_agent"
 
@@ -723,6 +1048,18 @@ def _approval_trigger(trace_id: str, policy_event_id: str | None, governance_eve
 	if policy_event_id:
 		return "policy_review", policy_event_id
 	raise CloudDatabaseError(f"{trace_id}: human approval requires a governance or policy review event")
+
+
+def _require_workflow_row(cursor: Any, trace_id: str) -> None:
+	"""Accept an idempotent update while still failing if the workflow is absent."""
+
+	if cursor.rowcount == 1:
+		return
+	if cursor.rowcount != 0:
+		raise CloudDatabaseError(f"{trace_id}: workflow_runs update affected {cursor.rowcount} rows")
+	cursor.execute("SELECT COUNT(*) FROM workflow_runs WHERE trace_id = %s", (trace_id,))
+	if int(cursor.fetchone()[0]) != 1:
+		raise CloudDatabaseError(f"{trace_id}: workflow_runs row was not updated")
 
 
 def _statement_owasp_category(statement: GovernanceStatement) -> str:

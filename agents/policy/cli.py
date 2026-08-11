@@ -28,8 +28,8 @@ def check(_args: argparse.Namespace) -> int:
         f"({summary['source_handoffs']} benchmark / {summary['all_source_handoffs']} total triage -> policy handoffs)"
     )
     print(f"Required cloud tables: {summary['required_tables']} verified")
-    print("Standalone LangGraph nodes: policy_reasoning -> policy_governance")
-    print("State-driven nodes: policy -> policy_governance")
+    print("Policy subgraph: policy -> policy_governance -> policy_handoff")
+    print("Parent integration: policy_agent -> policy_persistence -> downstream mapper")
     return 0
 
 

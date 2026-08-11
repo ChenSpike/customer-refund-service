@@ -1,5 +1,6 @@
 from importlib import import_module
 
+
 __all__ = [
     "PolicyAgentInput",
     "PolicyAgentOutput",
@@ -9,7 +10,9 @@ __all__ = [
     "policy_input_from_state",
     "policy_output_from_state",
     "policy_result_from_state",
+    "policy_stage_usage_from_state",
     "policy_usage_from_state",
+    "reconstruct_policy_state",
 ]
 
 
@@ -23,7 +26,9 @@ def __getattr__(name: str):
         "policy_input_from_state",
         "policy_output_from_state",
         "policy_result_from_state",
+        "policy_stage_usage_from_state",
         "policy_usage_from_state",
+        "reconstruct_policy_state",
     }:
         module = import_module(".policy_node", __name__)
         return getattr(module, name)

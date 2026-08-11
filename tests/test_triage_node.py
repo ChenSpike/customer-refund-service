@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.triage import node as triage_node_module
 from agents.triage.governance_node import GovernanceNode as TriageGovernanceNode
+from agents.triage.graph import triage_handoff_node
 from agents.triage.node import triage_node
 from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from app.state import AppState
@@ -113,10 +114,12 @@ def _graph(monkeypatch, queue, order):
     builder = StateGraph(AppState)
     builder.add_node("triage", triage_node)
     builder.add_node("triage_governance", TriageGovernanceNode())
+    builder.add_node("triage_handoff", triage_handoff_node)
     builder.add_edge(START, "triage")
     builder.add_edge("triage", "triage_governance")
+    builder.add_edge("triage_governance", "triage_handoff")
     builder.add_conditional_edges(
-        "triage_governance", map_triage_handoff_to_parent_node,
+        "triage_handoff", map_triage_handoff_to_parent_node,
         {"policy": END, "response_agent": END, "human_approval": END})
     return builder.compile()
 
@@ -124,7 +127,7 @@ def _graph(monkeypatch, queue, order):
 def test_clean_order_flows_to_policy(monkeypatch):
     app = _graph(monkeypatch, _classify_queue(
         {"refund_reason": "damaged", "requested_amount": None}), valid_order())
-    final = app.invoke({"user_id": "CUST-001", "message": "ORD-001 arrived damaged"})
+    final = app.invoke({"user_id": "CUST-001", "message": "My item arrived damaged"})
     assert final["triage_governance_result"]["status"] == "allow"
     assert final["triage_output"]["customer_request"]["refund_reason"] == "damaged"
     assert final["llm_input_tokens"] == 150
