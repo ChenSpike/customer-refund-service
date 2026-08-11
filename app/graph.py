@@ -9,6 +9,7 @@ from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from app.state import AppState
 from db.backend import DatabaseGovernanceEventRepository
 from db.database import GCPRepository
+from db.pipeline_store import PipelineStore, PolicyPersistenceNode
 
 
 def build_response_payload(state: AppState) -> dict:
@@ -105,15 +106,25 @@ def human_approval_node(state: AppState) -> dict:
     }
 
 
-def build_graph():
+def build_graph(
+    *,
+    client: AzureJsonClient | None = None,
+    repository: GCPRepository | None = None,
+):
     builder = StateGraph(AppState)
-    repository = DatabaseGovernanceEventRepository(GCPRepository.from_env())
-    azure = AzureJsonClient.from_env()
-    triage_agent = build_triage_agent_graph(client=azure, event_writer=repository)
-    policy_agent = build_policy_agent_graph(azure, event_writer=repository)
+    cloud_repository = repository or GCPRepository.from_env()
+    governance_repository = DatabaseGovernanceEventRepository(cloud_repository)
+    azure = client or AzureJsonClient.from_env()
+    triage_agent = build_triage_agent_graph(
+        client=azure,
+        event_writer=governance_repository,
+    )
+    policy_agent = build_policy_agent_graph(azure)
+    policy_persistence = PolicyPersistenceNode(PipelineStore(cloud_repository))
 
     builder.add_node("triage_agent", triage_agent)
     builder.add_node("policy_agent", policy_agent)
+    builder.add_node("policy_persistence", policy_persistence)
     builder.add_node("refund_agent", refund_node)
     builder.add_node("response_agent", response_node)
     builder.add_node("human_approval", human_approval_node)
@@ -128,8 +139,9 @@ def build_graph():
             "human_approval": "human_approval",
         },
     )
+    builder.add_edge("policy_agent", "policy_persistence")
     builder.add_conditional_edges(
-        "policy_agent",
+        "policy_persistence",
         map_policy_handoff_to_parent_node,
         {
             "refund_agent": "refund_agent",

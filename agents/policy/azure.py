@@ -14,7 +14,7 @@ from .models import ConfidenceEvidence, ConfidenceLevel, PrecedentEvidence, Toke
 
 
 POLICY_AGENT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = POLICY_AGENT_DIR.parent
+REPO_ROOT = POLICY_AGENT_DIR.parents[1]
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -85,7 +85,7 @@ class AzureJsonClient:
         try:
             from openai import AzureOpenAI
         except ImportError as error:
-            raise AzureConfigurationError("Install policy_agent/requirements.txt before running.") from error
+            raise AzureConfigurationError("Install the repository requirements before running.") from error
 
         self.deployment = deployment
         self.max_tokens = max_tokens
