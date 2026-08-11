@@ -1,7 +1,7 @@
 import pytest
 
 from agents.triage.routing import route_triage
-from app.graph import build_response_payload
+from app.response.node import build_response_payload
 
 
 @pytest.mark.parametrize(

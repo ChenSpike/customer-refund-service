@@ -107,3 +107,76 @@ def check_abnormal_input_shape(state) -> GovernanceCheckResult:
             return block_result("semantic_drift", f"Detected suspicious payload marker: {marker}", {"marker": marker})
 
     return allow_result("semantic_drift")
+
+def check_required_evidence_completeness(state) -> GovernanceCheckResult:
+    policy_context = state.get("policy_context") or {}
+    evidence_manifest = policy_context.get("evidence_manifest") or {}
+    required_fact_paths = evidence_manifest.get("required_fact_paths") or []
+    evidence_items = evidence_manifest.get("evidence_items") or []
+
+    if not required_fact_paths:
+        return block_result("forbidden_tool", "Missing required_fact_paths in policy evidence manifest")
+    if not evidence_items:
+        return block_result("forbidden_tool", "Missing evidence_items in policy evidence manifest")
+
+    return allow_result("forbidden_tool")
+
+
+def check_handoff_safety(state) -> GovernanceCheckResult:
+    policy_decision = state.get("policy_decision") or {}
+    decision = policy_decision.get("decision")
+    refund_amount = policy_decision.get("refund_amount")
+
+    if decision in {"approve", "partial_refund"} and (refund_amount is None or refund_amount <= 0):
+        return block_result("forbidden_tool", f"Unsafe handoff state: {decision} requires positive refund_amount")
+
+    return allow_result("forbidden_tool")
+
+
+
+# --- Response Agent
+
+_RESPONSE_TOOL_PATTERNS = [
+    re.compile(r'\btool[_\s](?:call|use|invoke|name)\b', re.I),
+    re.compile(r'\bfunction[_\s]call\b', re.I),
+    re.compile(r'\brefund_issuer\s*\(', re.I),
+    re.compile(r'"tool"\s*:\s*"', re.I),
+    re.compile(r'\badmin\s+mode\b', re.I),
+    re.compile(r'\btool\s+executed\b', re.I),
+]
+
+def _find_email(text: str) -> str | None:
+    matches = EMAIL_RE.findall(text)
+    return matches[0] if matches else None
+
+def _find_phone(text: str) -> str | None:
+    match = PHONE_RE.search(text)
+    return match.group(0) if match else None
+
+def _find_tool_invocation(text: str) -> str | None:
+    for pattern in _RESPONSE_TOOL_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    return None
+
+def check_response_tool_misuse(state) -> GovernanceCheckResult:
+    body = (state.get("response_result") or {}).get("response", {}).get("body", "")
+    if not body:
+        return allow_result("forbidden_tool")
+    match = _find_tool_invocation(body)
+    if match:
+        return block_result("forbidden_tool", f"Draft body contains tool-invocation language: {match!r}", {"match": match})
+    return allow_result("forbidden_tool")
+
+def check_response_pii(state) -> GovernanceCheckResult:
+    body = (state.get("response_result") or {}).get("response", {}).get("body", "")
+    if not body:
+        return allow_result("pii_risk")
+    email = _find_email(body)
+    if email:
+        return block_result("pii_risk", f"Draft body contains email address: {email}", {"email": email})
+    phone = _find_phone(body)
+    if phone:
+        return block_result("pii_risk", f"Draft body contains phone number: {phone}", {"phone": phone})
+    return allow_result("pii_risk")
