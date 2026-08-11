@@ -1,12 +1,12 @@
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 
 class AppState(TypedDict, total=False):
     # input
     user_id: str
     message: str
-    request_context: dict
+    request_context: dict[str, Any]
     buggy_db: bool
 
     # ids
@@ -18,10 +18,10 @@ class AppState(TypedDict, total=False):
     # llm usage
     llm_input_tokens: Annotated[int, operator.add]
     llm_output_tokens: Annotated[int, operator.add]
-    llm_usage_events: Annotated[list[dict], operator.add]
+    llm_usage_events: Annotated[list[dict[str, Any]], operator.add]
 
     # conversation
-    conversation_history: list
+    conversation_history: list[dict[str, Any]]
     missing_fields: list[str]
     user_action_required: bool
     human_review_required: bool
@@ -30,28 +30,29 @@ class AppState(TypedDict, total=False):
     clarification_question: str
 
     # triage outputs
-    order_lookup_result: dict
-    triage_output: dict
+    order_lookup_result: dict[str, Any]
+    triage_output: dict[str, Any]
     triage_handoff: str
 
     # governance
-    governance_result: dict
-    triage_governance_result: dict
-    policy_governance_result: dict
-    risk_flags: dict
+    governance_result: dict[str, Any]
+    triage_governance_result: dict[str, Any]
+    policy_governance_result: dict[str, Any]
+    risk_flags: Annotated[list[dict[str, Any]], operator.add]
 
     # policy outputs
-    policy_result: dict
-    policy_decision: dict
-    policy_context: dict
+    policy_result: dict[str, Any]
+    policy_decision: dict[str, Any]
+    policy_context: dict[str, Any]
     policy_handoff: str
+    policy_persistence_result: dict[str, Any]
 
     # downstream placeholders
-    refund_result: dict
-    response_result: dict
-    human_review: dict
+    refund_result: dict[str, Any]
+    response_result: dict[str, Any]
+    human_review: dict[str, Any]
 
     # observability
-    errors: Annotated[list[dict], operator.add]
-    audit_trail: Annotated[list[dict], operator.add]
-    snapshots: Annotated[list[dict], operator.add]
+    errors: Annotated[list[dict[str, Any]], operator.add]
+    audit_trail: Annotated[list[dict[str, Any]], operator.add]
+    snapshots: Annotated[list[dict[str, Any]], operator.add]

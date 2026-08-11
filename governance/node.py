@@ -64,37 +64,52 @@ def merge_assessment_with_check_results(
     assessment: GovernanceAssessment,
     check_results: list[GovernanceCheckResult],
 ) -> GovernanceAssessment:
-    blocked_checks = [item for item in check_results if item.status == "block"]
-    if not blocked_checks:
-        return assessment
-
-    findings = [
-        *assessment.findings,
-        *_findings_from_checks(blocked_checks),
-    ]
-    return GovernanceAssessment.model_construct(
-        governance=assessment.governance,
-        findings=findings,
+    deterministic = {
+        item.name: _finding_from_check(item)
+        for item in check_results
+        if item.status == "block"
+    }
+    merged = {finding.flag: finding for finding in assessment.findings}
+    merged.update(deterministic)
+    flag_order = ("semantic_drift", "forbidden_tool", "pii_risk")
+    findings = [merged[flag] for flag in flag_order if flag in merged]
+    return GovernanceAssessment.model_validate(
+        {
+            "governance": {
+                "semantic_drift_score": assessment.governance.semantic_drift_score,
+                "interceptor_action": "quarantine" if findings else "allow",
+                "flags": [finding.flag for finding in findings],
+            },
+            "findings": [finding.model_dump(mode="json") for finding in findings],
+        }
     )
 
 
 def _findings_from_checks(check_results: list[GovernanceCheckResult]) -> list[GovernanceFinding]:
-    return [
-        GovernanceFinding(
-            flag=item.name,
-            detail=item.detail or item.name,
-            source=item.source,
-        )
-        for item in check_results
-    ]
+    return [_finding_from_check(item) for item in check_results]
 
 
 def _finding_from_check(item: GovernanceCheckResult) -> GovernanceFinding:
     return GovernanceFinding(
         flag=item.name,
+        score=_evidence_score(item.evidence),
         detail=item.detail or item.name,
+        offending_content=_offending_content(item.evidence),
         source=item.source,
     )
+
+
+def _evidence_score(evidence: dict[str, object]) -> float | None:
+    score = evidence.get("score")
+    return float(score) if isinstance(score, (int, float)) else None
+
+
+def _offending_content(evidence: dict[str, object]) -> str | None:
+    for key in ("offending_content", "pattern"):
+        value = evidence.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _statement_summary(stage: str, status: str, blocked: list[GovernanceCheckResult]) -> str:

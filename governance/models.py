@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -77,7 +77,7 @@ class GovernanceStatement(GovernanceModel):
     status: Literal["allow", "block"]
     summary: str = Field(min_length=1)
     findings: list[GovernanceFinding] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")
     def validate_status(self) -> "GovernanceStatement":
