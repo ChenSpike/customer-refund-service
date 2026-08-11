@@ -3,10 +3,10 @@
 The Policy Agent converts a validated Triage state into a governed refund-policy decision. Its production integration is state-driven:
 
 ```text
-Parent AppState -> policy_reasoning -> policy_governance -> parent router -> parent persistence
+Parent AppState -> policy_reasoning -> policy_governance -> policy handoff -> parent mapper -> parent persistence
 ```
 
-The agent nodes return typed state patches only. They do not select the next node or write a database. The parent router owns routing and the parent persistence layer writes GCP. The existing `PolicyAgentService` remains available as a standalone GCP runner and uses the same reasoning, governance, routing, and Proposal contracts.
+The agent nodes return typed state patches only. They do not select the next node or write a database. The policy handoff step decides the abstract handoff, the parent mapper connects that handoff to the real parent node, and the parent persistence layer writes GCP. The existing `PolicyAgentService` remains available as a standalone GCP runner and uses the same reasoning, governance, routing, and Proposal contracts.
 
 The policy node evaluates the versioned knowledge base and optional precedent evidence. The governance node independently reviews OWASP risks without changing the policy decision. Azure OpenAI performs both reasoning stages; Python enforces contracts, routing consistency, repair limits, and persistence boundaries without substituting a local decision.
 
@@ -39,7 +39,7 @@ The policy node evaluates the versioned knowledge base and optional precedent ev
 | Decides | Applicable refund rules, decision, refund amount, confidence, and response guidance |
 | Governs | Semantic drift, forbidden tool claims, and PII risk without rewriting the policy result |
 | Produces | Typed Policy and Policy Governance state patches |
-| Routes | Parent router selects `refund_agent`, `response_agent`, or `human_approval` |
+| Routes | Policy handoff returns `refund`, `response`, or `human_review`; the parent mapper selects `refund_agent`, `response_agent`, or `human_approval` |
 | Persists | Parent persistence writes GCP; the standalone service retains its own compatible writer |
 
 The component begins after triage has identified and sanitized the case. Refund execution and final customer communication remain downstream responsibilities.
@@ -53,7 +53,7 @@ flowchart TD
     C --> D["4. Azure returns policy decision and confidence"]
     D --> E["5. policy_governance reviews the preserved policy result"]
     E --> F["6. Adapter returns allow or block state"]
-    F --> G["7. Parent router selects downstream node"]
+    F --> G["7. Policy handoff + parent mapper select downstream node"]
     G --> H["8. Parent persistence writes handoff, events, audit, and workflow"]
     D -. "Invalid after one repair" .-> X["Record failure and stop"]
     F -. "Invalid after one repair" .-> X
@@ -181,7 +181,7 @@ Governance runs in a separate Azure call and must preserve the policy evaluation
 A customer's uncertain order number for their own case is a policy conflict, not PII. The Azure governance result has only two internal actions:
 
 1. No findings -> `allow` and route by policy decision.
-2. One or more findings -> `quarantine`; the route resolver sends the case to `human_approval`.
+2. One or more findings -> `quarantine`; the handoff step sends the case to `human_approval`.
 
 The state adapter maps internal `quarantine` to the parent contract's `block`. It does not create a second business meaning. Both represent a governance-triggered human review, and governance preserves the complete Policy result.
 
@@ -453,7 +453,7 @@ Prompts, validators, models, and tests must remain synchronized. Changing only p
 | Precedent thresholds | Constants at the top of `policy_node.py` | Prompt wording, validator tests, README |
 | Governance flags | Governance types in `models.py` | `governance_node.py`, `OWASP_BY_FLAG` in `cloud_db.py`, schema if needed, tests |
 | Parent-state fields or mappings | `state_adapter.py` | Parent `app/state.py`, persistence adapter, state contract tests |
-| Downstream routes | `routing.py` | `PolicyAgentOutput` route validation, parent router, cloud workflow mapping, tests, diagrams |
+| Downstream routes | `routing.py` | `PolicyAgentOutput` route validation, policy handoff, parent mapper, cloud workflow mapping, tests, diagrams |
 | Human approval trigger model | `_approval_trigger()` and persistence in `cloud_db.py` | `002_unified_human_approval_trigger.sql`, schema checks, reset logic, cloud tests |
 | Graph topology | `graph.py` | State contracts, `service.py`, graph tests, diagrams |
 | Azure generation or repair | `azure.py` | `.env.example` and repair tests |

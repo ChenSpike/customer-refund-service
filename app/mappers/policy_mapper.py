@@ -1,7 +1,7 @@
 from agents.policy.routing import route_policy
 
 
-def resolve_policy_handoff(state) -> str:
+def determine_policy_handoff(state) -> str:
     governance = state.get("policy_governance_result") or {}
     decision = state.get("policy_decision") or {}
     return route_policy(

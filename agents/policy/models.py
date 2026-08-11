@@ -379,9 +379,16 @@ class PolicyAgentOutput(StrictModel):
         governance_status = (
             "block" if self.governance.interceptor_action == "quarantine" else "allow"
         )
-        expected_route = route_policy(self.decision.type, governance_status)
-        if self.handoff.next_agent != expected_route:
-            raise ValueError(f"decision and governance require route {expected_route}")
+        expected_handoff = route_policy(self.decision.type, governance_status)
+        expected_next_agent = {
+            "refund": "refund_agent",
+            "response": "response_agent",
+            "human_review": "human_approval",
+        }[expected_handoff]
+        if self.handoff.next_agent != expected_next_agent:
+            raise ValueError(
+                f"decision and governance require route {expected_next_agent}"
+            )
         return self
 
 

@@ -21,7 +21,7 @@ triage node ──▶ triage_governance (ASI07) ──▶ triage_handoff mapper 
 | `agents/triage/node.py` | Pure node: LLM classification + order lookup → `AppState` delta. On a missing/unknown order it sets `user_action_required` + `missing_fields` (declared fields the mapper and response node key off). No DB writes. |
 | `agents/triage/governance_node.py` | **`GovernanceNode(BaseGovernanceNode)`** — deterministic triage governance (PII / semantic-drift / **ASI07** schema+ownership). Returns `triage_governance_result` and, when an event writer is injected by the parent graph, persists a mapped `GovernanceStatement`. |
 | `agents/triage/prompts.py`, `helpers.py` | System prompt, valid reasons, `parse_requested_amount`, `light_clean`. |
-| `app/mappers/triage_mapper.py` | `resolve_triage_handoff` computes the subgraph handoff; `map_triage_handoff_to_parent_node` maps that handoff to the parent node. |
+| `app/mappers/triage_mapper.py` | `determine_triage_handoff` computes the subgraph handoff; `map_triage_handoff_to_parent_node` maps that handoff to the parent node. |
 | `tools/order_lookup.py` | `Order_Database_Lookup` tool schema + thin wrapper over `db.orders`. |
 | `db/orders.py` | Read path for `orders`/`customers` in main_db (normal + `buggy` `!=` JOIN). Independent of `db.database` on purpose (see below). |
 

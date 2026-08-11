@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.mappers.policy_mapper import resolve_policy_handoff
+from app.mappers.policy_mapper import determine_policy_handoff
 from app.state import AppState
 from governance import GovernanceEventWriter
 
@@ -12,7 +12,7 @@ from .policy_node import AppStatePolicyNode
 
 
 def policy_handoff_node(state: AppState) -> dict:
-    return {"policy_handoff": resolve_policy_handoff(state)}
+    return {"policy_handoff": determine_policy_handoff(state)}
 
 
 def build_policy_agent_graph(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from app.mappers.triage_mapper import resolve_triage_handoff
+from app.mappers.triage_mapper import determine_triage_handoff
 from app.state import AppState
 from governance import GovernanceEventWriter
 
@@ -13,7 +13,7 @@ from .node import triage_node
 
 
 def triage_handoff_node(state: AppState) -> dict:
-    return {"triage_handoff": resolve_triage_handoff(state)}
+    return {"triage_handoff": determine_triage_handoff(state)}
 
 
 def build_triage_agent_graph(

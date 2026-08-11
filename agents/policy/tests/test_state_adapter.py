@@ -83,7 +83,7 @@ def test_direct_policy_nodes_return_business_patches_and_usage_events() -> None:
     assert governance_patch["policy_governance_result"]["status"] == "allow"
     assert governance_patch["risk_flags"] == []
     assert governance_patch["llm_usage_events"][0]["stage"] == "policy_governance"
-    assert route_policy(final_state["policy_decision"]["decision"], final_state["policy_governance_result"]["status"]) == "refund_agent"
+    assert route_policy(final_state["policy_decision"]["decision"], final_state["policy_governance_result"]["status"]) == "refund"
     assert policy_output_from_state(final_state).handoff.next_agent == "refund_agent"
 
 
@@ -97,10 +97,16 @@ def test_direct_policy_nodes_mount_as_policy_and_policy_governance_in_parent_gra
     builder.add_edge("policy", "policy_governance")
     builder.add_conditional_edges(
         "policy_governance",
-        lambda state: route_policy(
-            state["policy_decision"]["decision"],
-            state["policy_governance_result"]["status"],
-        ),
+        lambda state: {
+            "refund": "refund_agent",
+            "response": "response_agent",
+            "human_review": "human_approval",
+        }[
+            route_policy(
+                state["policy_decision"]["decision"],
+                state["policy_governance_result"]["status"],
+            )
+        ],
         {
             "refund_agent": END,
             "response_agent": END,
@@ -222,21 +228,21 @@ def test_governance_block_preserves_policy_and_adds_stage_specific_findings() ->
     assert governance_patch["workflow_status"] == "waiting_human"
     assert governance_patch["governance_assessment"].governance.interceptor_action == "quarantine"
     assert governance_patch["governance_assessment"].findings[0].flag == "semantic_drift"
-    assert route_policy(state["policy_decision"]["decision"], governance_patch["policy_governance_result"]["status"]) == "human_approval"
+    assert route_policy(state["policy_decision"]["decision"], governance_patch["policy_governance_result"]["status"]) == "human_review"
 
 
 @pytest.mark.parametrize(
     ("decision", "status", "expected"),
     [
-        ("approve", "allow", "refund_agent"),
-        ("partial_refund", "allow", "refund_agent"),
-        ("deny", "allow", "response_agent"),
-        ("request_info", "allow", "response_agent"),
-        ("manual_review", "allow", "human_approval"),
-        ("approve", "block", "human_approval"),
+        ("approve", "allow", "refund"),
+        ("partial_refund", "allow", "refund"),
+        ("deny", "allow", "response"),
+        ("request_info", "allow", "response"),
+        ("manual_review", "allow", "human_review"),
+        ("approve", "block", "human_review"),
     ],
 )
-def test_parent_route_matrix(decision: str, status: str, expected: str) -> None:
+def test_policy_handoff_matrix(decision: str, status: str, expected: str) -> None:
     assert route_policy(decision, status) == expected
 
 
@@ -257,7 +263,7 @@ def test_request_info_proposal_handoff_uses_response_agent() -> None:
     state.update(governance_node(state))
 
     assert state["policy_decision"]["decision"] == "request_info"
-    assert route_policy(state["policy_decision"]["decision"], state["policy_governance_result"]["status"]) == "response_agent"
+    assert route_policy(state["policy_decision"]["decision"], state["policy_governance_result"]["status"]) == "response"
 
 
 def _app_state(policy_input) -> dict:
