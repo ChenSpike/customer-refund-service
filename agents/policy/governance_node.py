@@ -52,7 +52,7 @@ class GovernanceNode(BaseGovernanceNode):
         if reviewer is None and client is None:
             raise ValueError("policy governance requires either a client or reviewer")
         self.reviewer = reviewer or AzurePolicyGovernanceReviewer(client)
-        self.checkers = checkers or self.CHECKERS
+        self.checkers = self.CHECKERS if checkers is None else checkers
 
     def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         reconstructed = reconstruct_policy_state(state)

@@ -453,8 +453,7 @@ class GCPRepository:
 				""",
 				(workflow_status, current_agent, output.case.policy_version_used, trace_id),
 			)
-			if cursor.rowcount != 1:
-				raise CloudDatabaseError(f"{trace_id}: workflow_runs row was not updated")
+			_require_workflow_row(cursor, trace_id)
 			connection.commit()
 			return handoff_id
 		except Exception:
@@ -1049,6 +1048,18 @@ def _approval_trigger(trace_id: str, policy_event_id: str | None, governance_eve
 	if policy_event_id:
 		return "policy_review", policy_event_id
 	raise CloudDatabaseError(f"{trace_id}: human approval requires a governance or policy review event")
+
+
+def _require_workflow_row(cursor: Any, trace_id: str) -> None:
+	"""Accept an idempotent update while still failing if the workflow is absent."""
+
+	if cursor.rowcount == 1:
+		return
+	if cursor.rowcount != 0:
+		raise CloudDatabaseError(f"{trace_id}: workflow_runs update affected {cursor.rowcount} rows")
+	cursor.execute("SELECT COUNT(*) FROM workflow_runs WHERE trace_id = %s", (trace_id,))
+	if int(cursor.fetchone()[0]) != 1:
+		raise CloudDatabaseError(f"{trace_id}: workflow_runs row was not updated")
 
 
 def _statement_owasp_category(statement: GovernanceStatement) -> str:

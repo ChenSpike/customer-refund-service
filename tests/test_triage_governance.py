@@ -1,9 +1,13 @@
 """Triage governance node (ASI07) using shared deterministic governance checks."""
+import json
+
 import pytest
 
+from agents.policy.azure import AzureJsonResult
+from agents.policy.models import TokenUsage
 from agents.triage.governance_node import GovernanceNode, check_data_leakage
 from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
-from governance import BaseGovernanceNode
+from governance import BaseGovernanceNode, Governance, GovernanceAssessment
 from tests.fakes import leaked_order, valid_order
 
 
@@ -75,6 +79,30 @@ def test_node_allows_clean_lookup():
         "semantic_drift",
         "semantic_drift",
     ]
+
+
+def test_llm_governance_patch_contains_json_only_declared_state() -> None:
+    assessment = GovernanceAssessment(
+        governance=Governance(
+            semantic_drift_score=0.0,
+            interceptor_action="allow",
+            flags=[],
+        ),
+        findings=[],
+    )
+    node = GovernanceNode(
+        reviewer=lambda _state: AzureJsonResult(
+            value=assessment,
+            usage=TokenUsage(input_tokens=4, output_tokens=2),
+        )
+    )
+
+    patch = node(_state(valid_order()))
+
+    json.dumps(patch)
+    assert "governance_assessment" not in patch
+    assert "governance_usage" not in patch
+    assert patch["llm_usage_events"][0]["agent"] == "triage_agent"
 
 
 def test_node_blocks_pii_and_semantic_drift_from_shared_checkers():

@@ -7,9 +7,27 @@ from app.mappers.policy_mapper import map_policy_handoff_to_parent_node
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
-        ({"policy_handoff": "refund"}, "refund_agent"),
-        ({"policy_handoff": "response"}, "response_agent"),
-        ({"policy_handoff": "human_review"}, "human_approval"),
+        (
+            {
+                "policy_handoff": "refund",
+                "policy_persistence_result": {"next_agent": "refund_agent"},
+            },
+            "refund_agent",
+        ),
+        (
+            {
+                "policy_handoff": "response",
+                "policy_persistence_result": {"next_agent": "response_agent"},
+            },
+            "response_agent",
+        ),
+        (
+            {
+                "policy_handoff": "human_review",
+                "policy_persistence_result": {"next_agent": "human_approval"},
+            },
+            "human_approval",
+        ),
     ],
 )
 def test_route_after_policy_uses_explicit_handoff(state, expected):
@@ -34,3 +52,18 @@ def test_policy_routing_returns_handoff(decision, status, expected):
 def test_policy_mapper_requires_handoff() -> None:
     with pytest.raises(KeyError):
         map_policy_handoff_to_parent_node({})
+
+
+def test_policy_mapper_requires_persistence_before_routing() -> None:
+    with pytest.raises(ValueError, match="policy_persistence_result is required"):
+        map_policy_handoff_to_parent_node({"policy_handoff": "refund"})
+
+
+def test_policy_mapper_rejects_route_that_differs_from_persistence() -> None:
+    with pytest.raises(ValueError, match="persisted Policy route disagrees"):
+        map_policy_handoff_to_parent_node(
+            {
+                "policy_handoff": "refund",
+                "policy_persistence_result": {"next_agent": "response_agent"},
+            }
+        )

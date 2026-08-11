@@ -6,6 +6,14 @@ from typing import Literal
 DecisionName = Literal["approve", "deny", "partial_refund", "request_info", "manual_review"]
 GovernanceStatus = Literal["allow", "block"]
 RouteName = Literal["refund", "response", "human_review"]
+ParentAgent = Literal["refund_agent", "response_agent", "human_approval"]
+
+
+_PARENT_AGENT_BY_ROUTE: dict[RouteName, ParentAgent] = {
+    "refund": "refund_agent",
+    "response": "response_agent",
+    "human_review": "human_approval",
+}
 
 
 def route_policy(decision: DecisionName, governance_status: GovernanceStatus) -> RouteName:
@@ -20,6 +28,12 @@ def route_policy(decision: DecisionName, governance_status: GovernanceStatus) ->
         "request_info": "response",
         "manual_review": "human_review",
     }[decision]
+
+
+def parent_agent_for_route(route: RouteName) -> ParentAgent:
+    """Map the Policy subgraph handoff to its parent-graph node."""
+
+    return _PARENT_AGENT_BY_ROUTE[route]
 
 
 def handoff_reason(decision: DecisionName, governance_status: GovernanceStatus) -> str:

@@ -4,7 +4,9 @@ import json
 
 import pytest
 
-from policy_agent.azure import (
+from agents.policy.azure import (
+    POLICY_AGENT_DIR,
+    REPO_ROOT,
     AzureJsonClient,
     AzureJsonRepair,
     AzurePolicyRepair,
@@ -12,18 +14,18 @@ from policy_agent.azure import (
     _apply_json_repair,
     _strict_json_format,
 )
-from policy_agent.models import (
+from agents.policy.models import (
     PolicyEvidenceItem,
     PolicyGapOrConflict,
     PolicyReasoningResult,
     TokenUsage,
 )
-from policy_agent.policy_node import (
+from agents.policy.policy_node import (
     _policy_input_message,
     load_policy_context,
     validate_policy_result,
 )
-from policy_agent.tests.factories import (
+from agents.policy.tests.factories import (
     make_input,
     make_match,
     make_policy,
@@ -71,6 +73,11 @@ class RepeatingAzureClient(AzureJsonClient):
             content=self.repair_content if repair else self.content,
             usage=TokenUsage(input_tokens=5, output_tokens=2),
         )
+
+
+def test_azure_environment_root_is_the_repository_root() -> None:
+    assert REPO_ROOT == POLICY_AGENT_DIR.parents[1]
+    assert (REPO_ROOT / "agents" / "policy") == POLICY_AGENT_DIR
 
 
 def _validate(result, policy_input, precedents=None) -> None:

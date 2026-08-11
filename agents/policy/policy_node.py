@@ -23,7 +23,7 @@ from .models import (
     exact_policy_input,
 )
 from app.state import AppState
-from .routing import handoff_reason, route_policy
+from .routing import handoff_reason, parent_agent_for_route, route_policy
 
 
 POLICY_AGENT_DIR = Path(__file__).resolve().parent
@@ -285,11 +285,7 @@ def policy_output_from_state(
         policy_result.decision.type,
         governance_result.get("status", "block"),
     )
-    next_agent = {
-        "refund": "refund_agent",
-        "response": "response_agent",
-        "human_review": "human_approval",
-    }[handoff]
+    next_agent = parent_agent_for_route(handoff)
     output = PolicyAgentOutput(
         case=policy_result.case,
         customer_request=policy_result.customer_request,

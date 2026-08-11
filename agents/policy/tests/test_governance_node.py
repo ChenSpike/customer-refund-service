@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from governance import GovernanceStatement
+from types import SimpleNamespace
+
+import pytest
 
 from agents.policy.azure import AzureJsonResult
 from agents.policy.governance_node import AzurePolicyGovernanceReviewer, GovernanceNode
-from agents.policy.models import TokenUsage
-from agents.policy.tests.factories import allow_governance, make_input, make_policy_result, quarantine_governance
+from agents.policy.models import PolicyReasoningResult, TokenUsage
+from agents.policy.tests.factories import (
+    allow_governance,
+    make_input,
+    make_policy_result,
+    quarantine_governance,
+    unavailable_context,
+)
+from governance import Governance, GovernanceAssessment, GovernanceFinding
 
 
 class FakeAzureClient:
@@ -22,66 +31,149 @@ class FakeAzureClient:
         )
 
 
-class RecordingWriter:
-    def __init__(self) -> None:
-        self.saved: list[GovernanceStatement] = []
-
-    def save_event(self, statement: GovernanceStatement) -> str:
-        self.saved.append(statement)
-        return "gov-evt-1"
-
-
-def _state():
-    policy_input = make_input()
-    return {
-        "policy_input": policy_input,
-        "policy_result": make_policy_result(policy_input),
-        "policy_decision": {"reason": ""},
-    }
-
-
 def test_azure_policy_governance_reviewer_returns_assessment_and_usage() -> None:
     client = FakeAzureClient(allow_governance())
+    policy_input = make_input()
 
-    result = AzurePolicyGovernanceReviewer(client)(_state())
+    result = AzurePolicyGovernanceReviewer(client)(
+        {
+            "policy_input": policy_input,
+            "policy_result": make_policy_result(policy_input),
+        }
+    )
 
     assert result.value.governance.interceptor_action == "allow"
     assert result.usage.input_tokens == 11
     assert client.calls[0]["target"] == "governance assessment"
 
 
-def test_policy_governance_node_persists_blocked_assessment_via_shared_writer() -> None:
-    writer = RecordingWriter()
-    node = GovernanceNode(reviewer=lambda _state: AzureJsonResult(
-        value=quarantine_governance(),
-        usage=TokenUsage(input_tokens=7, output_tokens=2),
-    ), event_writer=writer)
+def test_policy_governance_allows_when_no_owasp_finding_exists() -> None:
+    patch = GovernanceNode(
+        reviewer=lambda _state: AzureJsonResult(
+            value=allow_governance(),
+            usage=TokenUsage(input_tokens=7, output_tokens=2),
+        )
+    )(_state())
 
-    patch = node(_state())
-
-    assert patch["governance_event_id"] == "gov-evt-1"
-    assert patch["governance_assessment"].governance.interceptor_action == "quarantine"
-    assert writer.saved[0].agent == "policy_agent"
-    assert writer.saved[0].stage == "policy_governance"
-    assert writer.saved[0].status == "block"
-    assert writer.saved[0].findings[0].source == "llm"
+    assert patch["policy_governance_result"]["status"] == "allow"
+    assert patch["policy_governance_result"]["findings"] == []
+    assert "governance_event_id" not in patch
+    assert "governance_assessment" not in patch
 
 
-def test_policy_governance_node_merges_deterministic_findings_into_assessment_and_statement() -> None:
-    writer = RecordingWriter()
-    state = _state()
-    state["policy_decision"] = {"reason": "I already issued the refund and checked the database directly."}
-    node = GovernanceNode(
+def test_deterministic_tool_misuse_is_a_genuine_owasp_block() -> None:
+    state = _state(reason="I already issued the refund and checked the database directly.")
+    patch = GovernanceNode(
+        reviewer=lambda _state: AzureJsonResult(
+            value=allow_governance(),
+            usage=TokenUsage(input_tokens=5, output_tokens=1),
+        )
+    )(state)
+
+    finding = patch["policy_governance_result"]["findings"][0]
+    assert patch["policy_governance_result"]["status"] == "block"
+    assert finding["flag"] == "forbidden_tool"
+    assert finding["source"] == "deterministic"
+    assert finding["offending_content"] == "i already issued the refund"
+
+
+def test_explicit_empty_checker_set_is_respected() -> None:
+    state = _state(reason="I already issued the refund and checked the database directly.")
+    patch = GovernanceNode(
         reviewer=lambda _state: AzureJsonResult(
             value=allow_governance(),
             usage=TokenUsage(input_tokens=5, output_tokens=1),
         ),
-        event_writer=writer,
+        checkers=(),
+    )(state)
+
+    assert patch["policy_governance_result"]["status"] == "allow"
+    assert patch["policy_governance_result"]["findings"] == []
+
+
+def test_deterministic_finding_overrides_duplicate_llm_finding() -> None:
+    llm = quarantine_governance("forbidden_tool")
+    state = _state(reason="The refund has been processed.")
+    patch = GovernanceNode(
+        reviewer=lambda _state: AzureJsonResult(
+            value=llm,
+            usage=TokenUsage(input_tokens=5, output_tokens=1),
+        )
+    )(state)
+
+    findings = patch["policy_governance_result"]["findings"]
+    assert len(findings) == 1
+    assert findings[0]["source"] == "deterministic"
+
+
+def test_merged_findings_use_consistent_owasp_order() -> None:
+    llm = GovernanceAssessment(
+        governance=Governance(
+            semantic_drift_score=0.9,
+            interceptor_action="quarantine",
+            flags=["pii_risk", "semantic_drift"],
+        ),
+        findings=[
+            GovernanceFinding(flag="pii_risk", detail="PII leak", source="llm"),
+            GovernanceFinding(flag="semantic_drift", detail="Prompt injection", source="llm"),
+        ],
+    )
+    state = _state(reason="Tool executed the refund.")
+    patch = GovernanceNode(
+        reviewer=lambda _state: AzureJsonResult(
+            value=llm,
+            usage=TokenUsage(input_tokens=5, output_tokens=1),
+        )
+    )(state)
+
+    assert patch["policy_governance_result"]["flags"] == [
+        "semantic_drift",
+        "forbidden_tool",
+        "pii_risk",
+    ]
+
+
+def test_invalid_reviewer_value_fails_without_governance_patch() -> None:
+    node = GovernanceNode(
+        reviewer=lambda _state: SimpleNamespace(
+            value={"not": "validated"},
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
     )
 
-    patch = node(state)
+    with pytest.raises((AttributeError, TypeError)):
+        node(_state())
 
-    assert patch["governance_assessment"].findings[0].flag == "forbidden_tool"
-    assert patch["governance_assessment"].findings[0].source == "deterministic"
-    assert writer.saved[0].status == "block"
-    assert writer.saved[0].findings[0].flag == "forbidden_tool"
+
+def _state(*, reason: str | None = None) -> dict:
+    policy_input = make_input()
+    policy_result = make_policy_result(policy_input)
+    if reason is not None:
+        policy_result.decision.reason = reason
+    precedents = unavailable_context()
+    payload = policy_input.model_dump(mode="json")
+    payload["case"]["goal"] = "evaluate refund eligibility"
+    return {
+        "trace_id": policy_input.case.trace_id,
+        "ticket_id": policy_input.case.ticket_id,
+        "triage_output": payload,
+        "policy_result": policy_result.model_dump(mode="json"),
+        "policy_decision": {
+            "decision": policy_result.decision.type,
+            "refund_amount": policy_result.decision.refund_amount,
+            "confidence": policy_result.decision.confidence,
+            "confidence_level": policy_result.decision.confidence_level,
+            "confidence_evidence": policy_result.decision.confidence_evidence.model_dump(mode="json"),
+            "precedent_evidence": policy_result.decision.precedent_evidence.model_dump(mode="json"),
+            "reason": policy_result.decision.reason,
+        },
+        "policy_context": {
+            "policy_version_used": policy_result.case.policy_version_used,
+            "policy_evaluation": policy_result.policy_evaluation.model_dump(mode="json"),
+            "response_guidance": policy_result.response_guidance.model_dump(mode="json"),
+            "evidence_manifest": policy_result.evidence_manifest.model_dump(mode="json"),
+            "precedent_context": precedents.model_dump(mode="json"),
+        },
+        "risk_flags": [],
+        "llm_usage_events": [],
+    }

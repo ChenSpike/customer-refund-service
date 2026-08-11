@@ -10,6 +10,7 @@ from agents.policy.models import (
     PrecedentContext,
     TokenUsage,
 )
+from agents.policy.routing import parent_agent_for_route
 from db.database import GCPRepository
 from governance import GovernanceAssessment
 
@@ -56,6 +57,7 @@ class PipelineStore:
 
         reconstructed = reconstruct_policy_state(state)
         policy_output = policy_output_from_state(state, reconstructed)
+        _validate_policy_handoff(state, policy_output)
         governance = GovernanceAssessment.model_validate(
             {
                 "governance": policy_output.governance.model_dump(mode="json"),
@@ -114,3 +116,14 @@ def persist_policy_state(
     repository: GCPRepository | None = None,
 ) -> PolicyPersistenceArtifacts:
     return PipelineStore(repository or GCPRepository.from_env()).persist_policy_state(state)
+
+
+def _validate_policy_handoff(
+    state: dict[str, Any],
+    output: PolicyAgentOutput,
+) -> None:
+    handoff = state.get("policy_handoff")
+    if handoff not in {"refund", "response", "human_review"}:
+        raise ValueError("policy_handoff must be present before Policy persistence")
+    if parent_agent_for_route(handoff) != output.handoff.next_agent:
+        raise ValueError("policy_handoff disagrees with the validated Policy output")

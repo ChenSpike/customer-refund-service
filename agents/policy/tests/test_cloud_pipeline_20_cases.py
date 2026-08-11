@@ -7,14 +7,14 @@ from collections import Counter
 
 import pytest
 
-from policy_agent.cloud_db import GCPRepository
-from policy_agent.models import PolicyAgentInput, PolicyAgentOutput, PolicyReasoningResult
-from policy_agent.policy_node import (
+from agents.policy.cloud_db import GCPRepository
+from agents.policy.models import PolicyAgentInput, PolicyAgentOutput, PolicyReasoningResult
+from agents.policy.policy_node import (
     load_policy_context,
     load_precedent_context,
     validate_policy_result,
 )
-from policy_agent.service import PolicyAgentService
+from agents.policy.service import PolicyAgentService
 
 
 EXPECTED_DECISIONS = {
@@ -142,7 +142,7 @@ def test_live_langgraph_policy_agent_processes_20_gcp_cases() -> None:
 
     service = PolicyAgentService.from_env()
     graph_nodes = set(service.graph.get_graph().nodes) - {"__start__", "__end__"}
-    assert graph_nodes == {"policy_reasoning", "policy_governance"}
+    assert graph_nodes == {"policy", "policy_governance", "policy_handoff"}
     processed = service.run("benchmark")
     assert len(processed) == 20
     assert all(item.policy_usage.input_tokens > 0 and item.policy_usage.output_tokens > 0 for item in processed)
