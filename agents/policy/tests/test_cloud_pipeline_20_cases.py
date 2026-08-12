@@ -128,17 +128,18 @@ def test_live_langgraph_policy_agent_processes_20_gcp_cases() -> None:
     repository = GCPRepository.from_env()
     assert repository.check_schema()["source_handoffs"] == 20
     unrelated_before = _unrelated_hashes(repository)
+    downstream_before = _benchmark_downstream_hashes(repository)
+    retained_before = repository.policy_artifact_ids()
 
     reset_counts = repository.reset_policy_agent_data()
     assert reset_counts["source_handoffs"] == 20
-    assert repository.policy_artifact_ids() == {
-        "source_handoffs": [str(value) for value in range(1, 21)],
-        "policy_handoffs": [],
-        "policy_review_events": [],
-        "governance_events": [],
-        "human_approvals": [],
-        "audit_log": [],
-    }
+    reset_ids = repository.policy_artifact_ids()
+    assert reset_ids["source_handoffs"] == [str(value) for value in range(1, 21)]
+    assert reset_ids["policy_handoffs"] == []
+    assert reset_ids["audit_log"] == []
+    for name in ("policy_review_events", "governance_events", "human_approvals"):
+        assert reset_ids[name] == retained_before[name]
+    assert _benchmark_downstream_hashes(repository) == downstream_before
 
     service = PolicyAgentService.from_env()
     graph_nodes = set(service.graph.get_graph().nodes) - {"__start__", "__end__"}
@@ -278,6 +279,7 @@ def test_live_langgraph_policy_agent_processes_20_gcp_cases() -> None:
     assert len(artifact_ids["audit_log"]) == 20
     assert all(event_type == "policy_agent_evaluated" for _, event_type in artifact_ids["audit_log"])
     assert _unrelated_hashes(repository) == unrelated_before
+    assert _benchmark_downstream_hashes(repository) == downstream_before
 
 
 def _successful_audit_payloads(repository: GCPRepository) -> dict[str, dict]:
@@ -321,6 +323,28 @@ def _unrelated_hashes(repository: GCPRepository) -> dict[str, str]:
                 """
             )
             payload = json.dumps(cursor.fetchall(), sort_keys=True, default=str, ensure_ascii=False).encode()
+            hashes[table] = hashlib.sha256(payload).hexdigest()
+        return hashes
+    finally:
+        connection.close()
+
+
+def _benchmark_downstream_hashes(repository: GCPRepository) -> dict[str, str]:
+    connection = repository._connect()
+    try:
+        cursor = connection.cursor(dictionary=True)
+        hashes = {}
+        for table in ("refund_transactions",):
+            cursor.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE trace_id REGEXP '^TRACE-POL-(00[1-9]|01[0-9]|020)$'
+                ORDER BY 1
+                """
+            )
+            payload = json.dumps(
+                cursor.fetchall(), sort_keys=True, default=str, ensure_ascii=False
+            ).encode()
             hashes[table] = hashlib.sha256(payload).hexdigest()
         return hashes
     finally:

@@ -47,6 +47,78 @@ def test_azure_policy_governance_reviewer_returns_assessment_and_usage() -> None
     assert client.calls[0]["target"] == "governance assessment"
 
 
+def test_azure_governance_rejects_required_case_metadata_as_pii() -> None:
+    policy_input = make_input()
+    assessment = GovernanceAssessment(
+        governance=Governance(
+            semantic_drift_score=0.0,
+            interceptor_action="quarantine",
+            flags=["pii_risk"],
+        ),
+        findings=[
+            GovernanceFinding(
+                flag="pii_risk",
+                detail="Required routing metadata was present.",
+                offending_content="TRACE-UNIT TICKET-UNIT",
+                source="llm",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="not present outside case metadata"):
+        AzurePolicyGovernanceReviewer(FakeAzureClient(assessment))(
+            {
+                "policy_input": policy_input,
+                "policy_result": make_policy_result(policy_input),
+            }
+        )
+
+
+def test_azure_governance_requires_llm_source() -> None:
+    policy_input = make_input()
+    assessment = quarantine_governance()
+    assessment.findings[0].source = "deterministic"
+
+    with pytest.raises(ValueError, match="must use source=llm"):
+        AzurePolicyGovernanceReviewer(FakeAzureClient(assessment))(
+            {
+                "policy_input": policy_input,
+                "policy_result": make_policy_result(policy_input),
+            }
+        )
+
+
+def test_azure_governance_accepts_customer_pii_evidence() -> None:
+    policy_input = make_input()
+    policy_input.customer_request.sanitized_text = (
+        "Another customer email other.customer@example.com appeared in my account."
+    )
+    assessment = GovernanceAssessment(
+        governance=Governance(
+            semantic_drift_score=0.0,
+            interceptor_action="quarantine",
+            flags=["pii_risk"],
+        ),
+        findings=[
+            GovernanceFinding(
+                flag="pii_risk",
+                detail="Another customer's email is visible.",
+                offending_content="other.customer@example.com",
+                source="llm",
+            )
+        ],
+    )
+
+    result = AzurePolicyGovernanceReviewer(FakeAzureClient(assessment))(
+        {
+            "policy_input": policy_input,
+            "policy_result": make_policy_result(policy_input),
+        }
+    )
+
+    assert result.value.findings[0].flag == "pii_risk"
+
+
 def test_policy_governance_allows_when_no_owasp_finding_exists() -> None:
     patch = GovernanceNode(
         reviewer=lambda _state: AzureJsonResult(

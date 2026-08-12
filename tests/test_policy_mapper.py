@@ -43,6 +43,10 @@ def test_route_after_policy_uses_explicit_handoff(state, expected):
         ("request_info", "allow", "response"),
         ("manual_review", "allow", "human_review"),
         ("approve", "block", "human_review"),
+        ("partial_refund", "block", "human_review"),
+        ("deny", "block", "human_review"),
+        ("request_info", "block", "human_review"),
+        ("manual_review", "block", "human_review"),
     ],
 )
 def test_policy_routing_returns_handoff(decision, status, expected):
