@@ -1,7 +1,7 @@
 import pytest
 
 from agents.triage.routing import route_triage
-from app.response.node import build_response_payload
+from agents.response.node import build_response_payload
 
 
 @pytest.mark.parametrize(
@@ -73,7 +73,7 @@ def test_build_response_payload_for_refund_success():
 
     assert payload == {
         "message": "Refund completed.",
-        "final_outcome": "approve",
+        "final_outcome": "approved",
         "workflow_status": "completed",
     }
 

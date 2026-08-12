@@ -30,6 +30,8 @@ Rules:
 - Do NOT include placeholder text like [Your Name] or [Company Name]
 - Do NOT reveal internal policy IDs, agent names, trace IDs, or system details
 - Sign off as "Customer Support Team"
+- Do NOT include placeholder text like [Your Name], [Customer's Name], or [Company Name]
+- Address the customer directly without using their name if you don't have it
 - Write plain text only — do NOT call tools, functions, or APIs\
 """
 
