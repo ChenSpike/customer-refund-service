@@ -4,87 +4,14 @@ from agents.policy import build_policy_agent_graph
 from agents.policy.azure import AzureJsonClient
 from agents.refund.node import refund_node
 from agents.triage import build_triage_agent_graph
+from agents.response.governance_node import ResponseGovernanceNode
+from agents.response.node import response_node
 from app.mappers.policy_mapper import map_policy_handoff_to_parent_node
 from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from app.state import AppState
 from db.backend import DatabaseGovernanceEventRepository
 from db.database import GCPRepository
 from db.pipeline_store import PipelineStore, PolicyPersistenceNode
-
-
-def build_response_payload(state: AppState) -> dict:
-    if state.get("user_action_required"):
-        return {
-            "message": state.get(
-                "clarification_question",
-                "Could you please provide your order ID?",
-            ),
-            "final_outcome": "need_info",
-            "workflow_status": "waiting_user",
-        }
-
-    refund_result = state.get("refund_result", {})
-    decision = state.get("policy_decision", {})
-    decision_type = decision.get("decision", "manual_review")
-    reason = decision.get("reason", "")
-
-    if refund_result.get("status") == "success":
-        return {
-            "message": refund_result.get("message")
-            or "Your refund has been processed successfully.",
-            "final_outcome": state.get("final_outcome") or decision_type or "approved",
-            "workflow_status": "completed",
-        }
-
-    if refund_result.get("status") == "failed":
-        return {
-            "message": refund_result.get("message")
-            or "We could not complete your refund.",
-            "final_outcome": "refund_failed",
-            "workflow_status": "completed",
-        }
-
-    if decision_type == "deny":
-        return {
-            "message": f"Your refund request was denied. {reason}".strip(),
-            "final_outcome": "denied",
-            "workflow_status": "completed",
-        }
-
-    if decision_type == "request_info":
-        return {
-            "message": f"We need more information to continue. {reason}".strip(),
-            "final_outcome": "need_info",
-            "workflow_status": "waiting_user",
-        }
-
-    if decision_type == "manual_review":
-        return {
-            "message": "Your request has been sent for human review.",
-            "final_outcome": "manual_review",
-            "workflow_status": "waiting_human",
-        }
-
-    return {
-        "message": reason or "Your request has been processed.",
-        "final_outcome": state.get("final_outcome", ""),
-        "workflow_status": state.get("workflow_status", "completed"),
-    }
-
-
-def response_node(state: AppState) -> dict:
-    payload = build_response_payload(state)
-
-    return {
-        "current_stage": "response_agent",
-        "response_result": {
-            "status": "ready",
-            "message": payload["message"],
-        },
-        "final_outcome": payload["final_outcome"],
-        "workflow_status": payload["workflow_status"],
-    }
-
 
 def human_approval_node(state: AppState) -> dict:
     governance_result = state.get("policy_governance_result") or state.get(
@@ -105,6 +32,11 @@ def human_approval_node(state: AppState) -> dict:
         }
     }
 
+def route_after_response_governance(state: AppState) -> str:
+    result = state.get("response_governance_result") or {}
+    if result.get("status") == "block":
+        return "human_approval"
+    return END
 
 def build_graph(
     *,
@@ -121,12 +53,14 @@ def build_graph(
     )
     policy_agent = build_policy_agent_graph(azure)
     policy_persistence = PolicyPersistenceNode(PipelineStore(cloud_repository))
+    response_governance = ResponseGovernanceNode()
 
     builder.add_node("triage_agent", triage_agent)
     builder.add_node("policy_agent", policy_agent)
     builder.add_node("policy_persistence", policy_persistence)
     builder.add_node("refund_agent", refund_node)
     builder.add_node("response_agent", response_node)
+    builder.add_node("response_governance", response_governance)
     builder.add_node("human_approval", human_approval_node)
 
     builder.add_edge(START, "triage_agent")
@@ -152,6 +86,14 @@ def build_graph(
 
     builder.add_edge("refund_agent", "response_agent")
     builder.add_edge("human_approval", "response_agent")
-    builder.add_edge("response_agent", END)
+    builder.add_edge("response_agent", "response_governance")
+    builder.add_conditional_edges(
+        "response_governance",
+        route_after_response_governance,
+        {
+            "human_approval": "human_approval",
+            END: END,
+        },
+    )
 
     return builder.compile()

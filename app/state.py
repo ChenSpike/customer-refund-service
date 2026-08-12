@@ -38,6 +38,7 @@ class AppState(TypedDict, total=False):
     governance_result: dict[str, Any]
     triage_governance_result: dict[str, Any]
     policy_governance_result: dict[str, Any]
+    response_governance_result: dict[str, Any]
     risk_flags: Annotated[list[dict[str, Any]], operator.add]
 
     # policy outputs
@@ -56,3 +57,4 @@ class AppState(TypedDict, total=False):
     errors: Annotated[list[dict[str, Any]], operator.add]
     audit_trail: Annotated[list[dict[str, Any]], operator.add]
     snapshots: Annotated[list[dict[str, Any]], operator.add]
+
