@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import mysql.connector
 import pytest
 
+import db.database as database
 from db.database import (
     POLICY_MIGRATION_002_PATH,
     CloudDatabaseError,
@@ -78,3 +80,41 @@ def test_workflow_update_rejects_multiple_affected_rows() -> None:
 
     with pytest.raises(CloudDatabaseError, match="affected 2 rows"):
         _require_workflow_row(cursor, "TRACE-1")
+
+
+def test_transient_mysql_connection_is_retried(monkeypatch) -> None:
+    expected = object()
+    attempts = iter(
+        [
+            mysql.connector.InterfaceError(msg="lost", errno=2013),
+            expected,
+        ]
+    )
+    sleeps: list[int] = []
+
+    def connect(**_config):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(database.mysql.connector, "connect", connect)
+    monkeypatch.setattr(database.time, "sleep", sleeps.append)
+
+    assert database.GCPRepository({})._connect() is expected
+    assert sleeps == [1]
+
+
+def test_nontransient_mysql_connection_error_fails_immediately(monkeypatch) -> None:
+    calls = 0
+
+    def connect(**_config):
+        nonlocal calls
+        calls += 1
+        raise mysql.connector.InterfaceError(msg="denied", errno=1045)
+
+    monkeypatch.setattr(database.mysql.connector, "connect", connect)
+
+    with pytest.raises(CloudDatabaseError, match="after 1 attempt"):
+        database.GCPRepository({})._connect()
+    assert calls == 1

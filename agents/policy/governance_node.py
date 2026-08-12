@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from textwrap import dedent
 from typing import Any
 
@@ -32,7 +33,11 @@ class AzurePolicyGovernanceReviewer:
             instructions=_governance_instructions(),
             input_text=_governance_input_message(policy_input, policy_result),
             model_type=GovernanceAssessment,
-            validate=lambda _assessment: None,
+            validate=lambda assessment: _validate_governance_assessment(
+                assessment,
+                policy_input,
+                policy_result,
+            ),
         )
 
 
@@ -126,6 +131,10 @@ def _governance_instructions() -> str:
           A customer giving an uncertain or mismatched order number for their own refund is a refund-policy conflict,
           not PII.
 
+        Required case.trace_id and case.ticket_id values are routing metadata. Their presence only in the case fields
+        is not a leak. Every finding must use source="llm" and quote exact offending content from the customer request,
+        order facts, policy evaluation, decision, response guidance, or evidence manifest. Do not cite case metadata.
+
         Return one detailed finding per detected flag. Findings must be ordered exactly like governance.flags. Use
         quarantine when any finding exists and allow otherwise. Do not select a downstream agent or emit routing
         fields. Never claim that a refund was executed.
@@ -146,3 +155,44 @@ def _governance_input_message(policy_input: PolicyAgentInput, policy_result: Pol
         ensure_ascii=False,
     )
     return "Return the OWASP governance assessment as JSON:\n" + payload
+
+
+def _validate_governance_assessment(
+    assessment: GovernanceAssessment,
+    policy_input: PolicyAgentInput,
+    policy_result: PolicyReasoningResult,
+) -> None:
+    reviewable = json.dumps(
+        {
+            "customer_request": policy_input.customer_request.model_dump(mode="json"),
+            "order_facts": policy_input.order_facts.model_dump(mode="json"),
+            "policy_evaluation": policy_result.policy_evaluation.model_dump(mode="json"),
+            "decision": policy_result.decision.model_dump(mode="json"),
+            "response_guidance": policy_result.response_guidance.model_dump(mode="json"),
+            "evidence_manifest": policy_result.evidence_manifest.model_dump(mode="json"),
+        },
+        ensure_ascii=False,
+    )
+    errors: list[str] = []
+    for finding in assessment.findings:
+        if finding.source != "llm":
+            errors.append(f"{finding.flag} must use source=llm")
+        if not finding.offending_content:
+            errors.append(f"{finding.flag} must quote offending_content")
+        elif not _content_is_supported(finding.offending_content, reviewable):
+            errors.append(f"{finding.flag} offending_content is not present outside case metadata")
+    if errors:
+        raise ValueError("governance assessment validation errors: " + " | ".join(errors))
+
+
+def _content_is_supported(offending_content: str, reviewable: str) -> bool:
+    quoted = offending_content.casefold()
+    searchable = reviewable.casefold()
+    if quoted in searchable:
+        return True
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9@._-]+", quoted)
+        if len(token) >= 3 and token not in {"the", "and", "for", "from", "with"}
+    }
+    return bool(tokens) and tokens.issubset(set(re.findall(r"[a-z0-9@._-]+", searchable)))

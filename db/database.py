@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +28,8 @@ POLICY_MIGRATION_001_PATH = REPO_ROOT / "agents" / "policy" / "migrations" / "00
 POLICY_MIGRATION_002_PATH = REPO_ROOT / "agents" / "policy" / "migrations" / "002_unified_human_approval_trigger.sql"
 RunMode = Literal["pending", "all", "trace", "benchmark"]
 BENCHMARK_TRACE_PATTERN = r"^TRACE-POL-(00[1-9]|01[0-9]|020)$"
+TRANSIENT_MYSQL_ERRORS = frozenset({2003, 2006, 2013})
+MYSQL_CONNECT_ATTEMPTS = 3
 
 REQUIRED_COLUMNS = {
 	"agent_handoffs": {
@@ -463,7 +466,12 @@ class GCPRepository:
 			connection.close()
 
 	def reset_policy_agent_data(self) -> dict[str, int]:
-		"""Return the 20 benchmark workflows to their Triage-to-Policy baseline."""
+		"""Prepare the 20 benchmark workflows for an idempotent Policy rerun.
+
+		Event and approval rows keep their stable identities until each trace is
+		replaced. Downstream tables may reference those approvals, so deleting them
+		would either violate foreign keys or remove data owned by another agent.
+		"""
 
 		connection = self._connect()
 		try:
@@ -480,38 +488,6 @@ class GCPRepository:
 			counts = {"source_handoffs": int(cursor.fetchone()[0])}
 
 			deletions = (
-				(
-					"human_approvals",
-					"""
-					DELETE approvals FROM human_approvals approvals
-					JOIN agent_handoffs source ON source.trace_id = approvals.trace_id
-					WHERE source.from_agent = 'triage_agent'
-					  AND source.to_agent = 'policy_agent'
-					  AND source.trace_id REGEXP %s
-					  AND approvals.approval_id LIKE 'POL-APP-%%'
-					""",
-				),
-				(
-					"policy_review_events",
-					"""
-					DELETE reviews FROM policy_review_events reviews
-					JOIN agent_handoffs source ON source.trace_id = reviews.trace_id
-					WHERE source.from_agent = 'triage_agent'
-					  AND source.to_agent = 'policy_agent'
-					  AND source.trace_id REGEXP %s
-					""",
-				),
-				(
-					"governance_events",
-					"""
-					DELETE events FROM governance_events events
-					JOIN agent_handoffs source ON source.trace_id = events.trace_id
-					WHERE source.from_agent = 'triage_agent'
-					  AND source.to_agent = 'policy_agent'
-					  AND source.trace_id REGEXP %s
-					  AND events.agent = 'policy_agent'
-					""",
-				),
 				(
 					"audit_log",
 					"""
@@ -538,6 +514,17 @@ class GCPRepository:
 			for name, statement in deletions:
 				cursor.execute(statement, (BENCHMARK_TRACE_PATTERN,))
 				counts[name] = cursor.rowcount
+
+			for name, table, condition in (
+				("retained_policy_review_events", "policy_review_events", "1 = 1"),
+				("retained_governance_events", "governance_events", "agent = 'policy_agent'"),
+				("retained_human_approvals", "human_approvals", "approval_id LIKE 'POL-APP-%%'"),
+			):
+				cursor.execute(
+					f"SELECT COUNT(*) FROM {table} WHERE trace_id REGEXP %s AND {condition}",
+					(BENCHMARK_TRACE_PATTERN,),
+				)
+				counts[name] = int(cursor.fetchone()[0])
 
 			cursor.execute(
 				"""
@@ -1005,10 +992,18 @@ class GCPRepository:
 		return bool(cursor.fetchone()[0])
 
 	def _connect(self):
-		try:
-			return mysql.connector.connect(**self.connection_config)
-		except mysql.connector.Error as error:
-			raise CloudDatabaseError(f"Could not connect to GCP MySQL {DATABASE_NAME}: {error}") from error
+		last_error: mysql.connector.Error | None = None
+		for attempt in range(1, MYSQL_CONNECT_ATTEMPTS + 1):
+			try:
+				return mysql.connector.connect(**self.connection_config)
+			except mysql.connector.Error as error:
+				last_error = error
+				if error.errno not in TRANSIENT_MYSQL_ERRORS or attempt == MYSQL_CONNECT_ATTEMPTS:
+					break
+				time.sleep(attempt)
+		raise CloudDatabaseError(
+			f"Could not connect to GCP MySQL {DATABASE_NAME} after {attempt} attempt(s): {last_error}"
+		) from last_error
 
 
 def load_database_env() -> None:
