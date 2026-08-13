@@ -22,10 +22,21 @@ def test_allow_when_owner_matches():
     assert check_data_leakage(_state(valid_order())).status == "allow"
 
 
-def test_block_on_ownership_mismatch():
+def test_block_on_contact_leak():
+    # leaked_order: order owned by CUST-001 but a foreign contact (CUST-002)
+    # joined in — the buggy-JOIN data leak. Requester still owns the order.
     finding = check_data_leakage(_state(leaked_order()))
     assert finding.status == "block"
-    assert finding.evidence["failed_check"] == "ownership"
+    assert finding.evidence["failed_check"] == "contact_leak"
+    assert finding.evidence["rule"] == "ASI07"
+
+
+def test_block_when_requester_is_not_order_owner():
+    # BOLA/IDOR: a valid, un-leaked order, but the requesting user does not own
+    # it — quoting someone else's order id must not grant access.
+    finding = check_data_leakage(_state(valid_order(), user_id="CUST-999"))
+    assert finding.status == "block"
+    assert finding.evidence["failed_check"] == "authorization"
     assert finding.evidence["rule"] == "ASI07"
 
 

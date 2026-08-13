@@ -80,18 +80,38 @@ def check_data_leakage(state: dict[str, Any]) -> GovernanceCheckResult:
             source="deterministic",
         )
 
-    # B. Ownership — the joined contact must belong to the requesting user.
-    if raw["contact_customer_id"] != user_id:
+    # B1. Authorization — the requesting user must own the order. Guards against
+    # BOLA/IDOR: quoting someone else's order id must not grant access to it.
+    if raw["order_customer_id"] != user_id:
         return GovernanceCheckResult(
             name="data_leakage",
             status="block",
             detail=(
-                f"ASI07 ownership: contact_customer_id '{raw['contact_customer_id']}' "
-                f"does not match requesting user '{user_id}'"
+                f"ASI07 authorization: requesting user '{user_id}' does not own "
+                f"order (owner '{raw['order_customer_id']}')"
             ),
             evidence={
                 "rule": "ASI07",
-                "failed_check": "ownership",
+                "failed_check": "authorization",
+                "offending_field": "order_customer_id",
+                "offending_value": raw["order_customer_id"],
+            },
+            source="deterministic",
+        )
+
+    # B2. Contact integrity — the joined contact must belong to the order owner.
+    # Guards against the buggy-JOIN data leak (a foreign customer's contact row).
+    if raw["contact_customer_id"] != raw["order_customer_id"]:
+        return GovernanceCheckResult(
+            name="data_leakage",
+            status="block",
+            detail=(
+                f"ASI07 leak: contact_customer_id '{raw['contact_customer_id']}' "
+                f"does not belong to order owner '{raw['order_customer_id']}'"
+            ),
+            evidence={
+                "rule": "ASI07",
+                "failed_check": "contact_leak",
                 "offending_field": "contact_customer_id",
                 "offending_value": raw["contact_customer_id"],
             },

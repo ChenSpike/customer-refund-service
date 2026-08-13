@@ -4,7 +4,9 @@ from governance.models import GovernanceCheckResult
 
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+?\d[\d\s().-]{7,}\d)\b")
-IDENTIFIER_RE = re.compile(r"\b(?:TRACE|TICKET|ORDER|ORD|WORKFLOW)[-_:][A-Z0-9-]+\b", re.IGNORECASE)
+# Internal, system-generated identifiers only. ORDER/ORD are customer-facing —
+# a customer must cite their own order id, so flagging it here is a false positive.
+IDENTIFIER_RE = re.compile(r"\b(?:TRACE|TICKET|WORKFLOW)[-_:][A-Z0-9-]+\b", re.IGNORECASE)
 
 
 def allow_result(name: str, *, source: str = "deterministic") -> GovernanceCheckResult:
