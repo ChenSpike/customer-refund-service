@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Refund Service</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; background: #f4f5f7; color: #1a1a1a;
+    display: flex; justify-content: center; padding: 2rem 1rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1b1e; color: #e8e8e8; }
+    .card, textarea, input { background: #26272b !important; color: #e8e8e8 !important; border-color: #3a3b40 !important; }
+    .muted { color: #9aa0a6 !important; }
+  }
+  main { width: 100%; max-width: 620px; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .muted { color: #6b7280; font-size: .85rem; margin: 0 0 1.5rem; }
+  .card { background: #fff; border: 1px solid #e3e4e8; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+  label { display: block; font-weight: 600; font-size: .85rem; margin: 0 0 .35rem; }
+  textarea, input {
+    width: 100%; padding: .6rem .7rem; border: 1px solid #d1d5db; border-radius: 8px;
+    font-size: .95rem; font-family: inherit; background: #fff;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  .row { margin-bottom: 1rem; }
+  button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 8px;
+    padding: .65rem 1.2rem; font-size: .95rem; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .examples { font-size: .8rem; margin-top: .5rem; }
+  .examples code { background: rgba(127,127,127,.15); padding: .1rem .35rem; border-radius: 4px; cursor: pointer; }
+  .badge { display: inline-block; padding: .2rem .6rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+  .b-approved { background: #dcfce7; color: #166534; }
+  .b-denied { background: #fee2e2; color: #991b1b; }
+  .b-need_info, .b-waiting_user { background: #fef9c3; color: #854d0e; }
+  .b-manual_review, .b-waiting_human { background: #ffedd5; color: #9a3412; }
+  .b-allow { background: #dcfce7; color: #166534; }
+  .b-block { background: #fee2e2; color: #991b1b; }
+  .b-mode { background: rgba(127,127,127,.15); color: inherit; }
+  .outcome-line { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .9rem; }
+  .email { white-space: pre-wrap; line-height: 1.5; font-size: .92rem; border-left: 3px solid #2563eb; padding-left: .8rem; }
+  .gov { font-size: .82rem; margin-top: .9rem; }
+  .gov .detail { color: #b45309; margin-top: .3rem; }
+  .hidden { display: none; }
+  .modebar { font-size: .75rem; text-align: right; margin-bottom: .5rem; }
+</style>
+</head>
+<body>
+<main>
+  <div class="modebar"><span id="mode" class="badge b-mode">…</span></div>
+  <h1>Refund Request</h1>
+  <p class="muted">Tell us what happened and we'll process your refund.</p>
+
+  <div class="card">
+    <div class="row">
+      <label for="msg">Your message</label>
+      <textarea id="msg" placeholder="e.g. My headphones arrived damaged. Order ORD-001."></textarea>
+    </div>
+    <div class="row">
+      <label for="oid">Order ID (optional if included above)</label>
+      <input id="oid" placeholder="ORD-001" />
+    </div>
+    <button id="send">Submit refund request</button>
+    <div class="examples muted">
+      Try:
+      <code data-fill="My headphones arrived damaged. Order ORD-001.">damaged → approve</code>
+      <code data-fill="I changed my mind about ORD-777.">no reason → deny</code>
+      <code data-fill="I want a refund.">missing id → need info</code>
+      <code data-fill="My item is damaged, order ORD-LEAK.">ASI07 leak → review</code>
+    </div>
+  </div>
+
+  <div id="result" class="card hidden">
+    <div class="outcome-line">
+      <strong>Outcome:</strong>
+      <span id="outcome" class="badge"></span>
+      <span id="status" class="badge"></span>
+    </div>
+    <div id="email" class="email"></div>
+    <div class="gov">
+      <strong>Governance:</strong>
+      triage <span id="g-triage" class="badge"></span>
+      <span id="g-policy-wrap">policy <span id="g-policy" class="badge"></span></span>
+      <div id="g-detail" class="detail hidden"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+fetch("/api/health").then(r => r.json()).then(h => {
+  $("mode").textContent = `azure:${h.azure} · db:${h.db}`;
+}).catch(() => {});
+
+document.querySelectorAll("[data-fill]").forEach(el => {
+  el.addEventListener("click", () => { $("msg").value = el.dataset.fill; $("oid").value = ""; });
+});
+
+function badge(el, text, cls) {
+  el.textContent = text ?? "—";
+  el.className = "badge " + (text ? "b-" + text : "b-mode");
+  if (cls) el.classList.add(cls);
+}
+
+$("send").addEventListener("click", async () => {
+  const message = $("msg").value.trim();
+  if (!message) { $("msg").focus(); return; }
+  $("send").disabled = true; $("send").textContent = "Processing…";
+  try {
+    const res = await fetch("/api/refund", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, order_id: $("oid").value.trim() || null }),
+    });
+    const d = await res.json();
+    $("result").classList.remove("hidden");
+    badge($("outcome"), d.final_outcome);
+    badge($("status"), d.workflow_status);
+    $("email").textContent = d.response_body || "(no response)";
+    badge($("g-triage"), d.governance?.triage);
+    if (d.governance?.policy) {
+      $("g-policy-wrap").classList.remove("hidden");
+      badge($("g-policy"), d.governance.policy);
+    } else {
+      $("g-policy-wrap").classList.add("hidden");
+    }
+    const det = $("g-detail");
+    if (d.governance?.detail) { det.textContent = "⚠ " + d.governance.detail; det.classList.remove("hidden"); }
+    else det.classList.add("hidden");
+  } catch (e) {
+    $("result").classList.remove("hidden");
+    $("email").textContent = "Request failed: " + e;
+  } finally {
+    $("send").disabled = false; $("send").textContent = "Submit refund request";
+  }
+});
+</script>
+</body>
+</html>
