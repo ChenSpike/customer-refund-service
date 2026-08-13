@@ -38,6 +38,40 @@ class PolicyPersistenceArtifacts:
         }
 
 
+@dataclass(frozen=True)
+class TriagePersistenceArtifacts:
+    handoff_id: str
+    trace_id: str
+    next_agent: str
+
+    def state_patch(self) -> dict[str, Any]:
+        return {
+            "current_stage": "triage_persistence",
+            "triage_persistence_result": {
+                "handoff_id": self.handoff_id,
+                "trace_id": self.trace_id,
+                "next_agent": self.next_agent,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ResponsePersistenceArtifacts:
+    handoff_id: str
+    trace_id: str
+    next_agent: str
+
+    def state_patch(self) -> dict[str, Any]:
+        return {
+            "current_stage": "response_persistence",
+            "response_persistence_result": {
+                "handoff_id": self.handoff_id,
+                "trace_id": self.trace_id,
+                "next_agent": self.next_agent,
+            },
+        }
+
+
 class PipelineStore:
     """Own the single transactional write for a completed Policy subgraph."""
 
@@ -83,6 +117,84 @@ class PipelineStore:
             human_approval_count=int(next_agent == "human_approval"),
         )
 
+    def persist_triage_state(self, state: dict[str, Any]) -> TriagePersistenceArtifacts:
+        handoff = state.get("triage_handoff")
+        if handoff not in {"policy", "response", "human_review"}:
+            raise ValueError("triage_handoff must be present before Triage persistence")
+        next_agent = {
+            "policy": "policy",
+            "response": "response_agent",
+            "human_review": "human_approval",
+        }[handoff]
+        trace_id = str(state.get("trace_id") or "")
+        if not trace_id:
+            raise ValueError("trace_id must be present before Triage persistence")
+        ticket_id = str(state.get("ticket_id") or "")
+        if not ticket_id:
+            raise ValueError("ticket_id must be present before Triage persistence")
+        handoff_id = self.repository.persist_agent_handoff(
+            trace_id=trace_id,
+            ticket_id=ticket_id,
+            from_agent="triage_agent",
+            to_agent=next_agent,
+            input_payload={
+                "message": state.get("message"),
+                "user_id": state.get("user_id"),
+                "requested_order_id": state.get("requested_order_id"),
+            },
+            output_payload={
+                "triage_output": state.get("triage_output"),
+                "triage_governance_result": state.get("triage_governance_result"),
+                "triage_handoff": handoff,
+            },
+            input_tokens=int(state.get("llm_input_tokens") or 0),
+            output_tokens=int(state.get("llm_output_tokens") or 0),
+            audit_event_type="triage_agent_evaluated",
+            workflow_status="waiting_human" if next_agent == "human_approval" else "running",
+            current_agent=next_agent,
+        )
+        return TriagePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
+
+    def persist_response_state(self, state: dict[str, Any]) -> ResponsePersistenceArtifacts:
+        handoff = state.get("response_handoff")
+        if handoff not in {"end", "human_review"}:
+            raise ValueError("response_handoff must be present before Response persistence")
+        next_agent = {
+            "end": "end",
+            "human_review": "human_approval",
+        }[handoff]
+        trace_id = str(state.get("trace_id") or "")
+        if not trace_id:
+            raise ValueError("trace_id must be present before Response persistence")
+        ticket_id = str(state.get("ticket_id") or "")
+        if not ticket_id:
+            raise ValueError("ticket_id must be present before Response persistence")
+        response_result = state.get("response_result") or {}
+        workflow_status = str(response_result.get("workflow_status") or state.get("workflow_status") or "completed")
+        current_agent = "completed" if next_agent == "end" else next_agent
+        handoff_id = self.repository.persist_agent_handoff(
+            trace_id=trace_id,
+            ticket_id=ticket_id,
+            from_agent="response_agent",
+            to_agent=next_agent,
+            input_payload={
+                "message": state.get("message"),
+                "user_id": state.get("user_id"),
+                "human_review": state.get("human_review"),
+            },
+            output_payload={
+                "response_result": response_result,
+                "response_governance_result": state.get("response_governance_result"),
+                "response_handoff": handoff,
+            },
+            input_tokens=int(state.get("llm_input_tokens") or 0),
+            output_tokens=int(state.get("llm_output_tokens") or 0),
+            audit_event_type="response_agent_evaluated",
+            workflow_status=workflow_status,
+            current_agent=current_agent,
+        )
+        return ResponsePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
+
     def persist_policy_artifacts(
         self,
         *,
@@ -109,6 +221,22 @@ class PolicyPersistenceNode:
 
     def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         return self.store.persist_policy_state(state).state_patch()
+
+
+class TriagePersistenceNode:
+    def __init__(self, store: PipelineStore) -> None:
+        self.store = store
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self.store.persist_triage_state(state).state_patch()
+
+
+class ResponsePersistenceNode:
+    def __init__(self, store: PipelineStore) -> None:
+        self.store = store
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self.store.persist_response_state(state).state_patch()
 
 
 def persist_policy_state(

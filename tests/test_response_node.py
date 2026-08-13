@@ -70,6 +70,36 @@ def _need_info_state() -> dict:
     }
 
 
+def _approved_human_review_state() -> dict:
+    return {
+        "trace_id": "TRACE-H-1",
+        "ticket_id": "TK-H-001",
+        "user_id": "CUST-H-001",
+        "human_review": {
+            "status": "approved",
+            "approved_next_agent": "refund_agent",
+            "reason": "manual approval",
+        },
+        "policy_decision": {"decision": "manual_review"},
+        "refund_result": {},
+    }
+
+
+def _rejected_human_review_state() -> dict:
+    return {
+        "trace_id": "TRACE-H-2",
+        "ticket_id": "TK-H-002",
+        "user_id": "CUST-H-002",
+        "human_review": {
+            "status": "rejected",
+            "rejected_next_agent": "response_agent",
+            "reason": "manual rejection",
+        },
+        "policy_decision": {"decision": "manual_review"},
+        "refund_result": {},
+    }
+
+
 # ── response_node: happy paths ────────────────────────────────────────────────
 
 def test_response_node_approve_success(monkeypatch):
@@ -129,6 +159,28 @@ def test_response_node_partial_refund(monkeypatch):
     assert out["final_outcome"]  == "partial_refund"
     assert out["workflow_status"] == "completed"
     assert out["response_result"]["response"]["tone"] == "neutral"
+
+
+def test_response_node_after_human_approval_completes(monkeypatch):
+    draft = "Our review team approved your request and your refund is being processed. Customer Support Team"
+    _install(monkeypatch, [FakeResponse([MessageItem(draft)], usage=(16, 11))])
+
+    out = response_node(_approved_human_review_state())
+
+    assert out["final_outcome"] == "approved"
+    assert out["workflow_status"] == "completed"
+    assert out["response_result"]["response"]["body"] == draft
+
+
+def test_response_node_after_human_rejection_completes(monkeypatch):
+    draft = "Our review team completed the review and we cannot approve the refund. Customer Support Team"
+    _install(monkeypatch, [FakeResponse([MessageItem(draft)], usage=(16, 11))])
+
+    out = response_node(_rejected_human_review_state())
+
+    assert out["final_outcome"] == "denied"
+    assert out["workflow_status"] == "completed"
+    assert out["response_result"]["response"]["body"] == draft
 
 
 def test_response_node_refund_failed(monkeypatch):

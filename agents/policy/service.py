@@ -69,10 +69,14 @@ class PolicyAgentService:
                     result,
                     "policy_governance",
                 )
-                artifacts = self.pipeline_store.persist_policy_state(result)
+                persistence = result.get("policy_persistence_result") or {}
+                if persistence.get("handoff_id"):
+                    handoff_id = persistence["handoff_id"]
+                else:
+                    handoff_id = self.pipeline_store.persist_policy_state(result).handoff_id
                 processed.append(
                     ProcessedCase(
-                        artifacts.handoff_id,
+                        handoff_id,
                         output,
                         usage,
                         policy_usage,

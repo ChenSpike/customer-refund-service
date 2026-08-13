@@ -3,38 +3,35 @@ from langgraph.graph import END, START, StateGraph
 from agents.policy import build_policy_agent_graph
 from agents.policy.azure import AzureJsonClient
 from agents.refund.node import refund_node
+from agents.response import build_response_agent_graph
 from agents.triage import build_triage_agent_graph
-from agents.response.governance_node import ResponseGovernanceNode
-from agents.response.node import response_node
 from app.mappers.policy_mapper import map_policy_handoff_to_parent_node
 from app.mappers.triage_mapper import map_triage_handoff_to_parent_node
 from app.state import AppState
 from db.backend import DatabaseGovernanceEventRepository
 from db.database import GCPRepository
-from db.pipeline_store import PipelineStore, PolicyPersistenceNode
+from db.pipeline_store import PipelineStore
 
 def human_approval_node(state: AppState) -> dict:
-    governance_result = state.get("policy_governance_result") or state.get(
-        "triage_governance_result"
-    ) or state.get("governance_result", {})
-    policy_decision = state.get("policy_decision", {})
-
-    reason = "manual_review"
-    if governance_result.get("status") == "block":
-        reason = "governance_block"
-    elif policy_decision.get("decision") == "manual_review":
-        reason = "policy_manual_review"
+    reason = state.get("review_trigger_reason") or "manual_review"
+    stage = state.get("review_trigger_stage") or "unknown"
 
     return {
+        "current_stage": "human_approval",
         "human_review": {
             "status": "pending",
             "reason": reason,
-        }
+            "stage": stage,
+        },
+        "human_review_required": True,
+        "final_outcome": "manual_review",
+        "workflow_status": "waiting_human",
     }
 
-def route_after_response_governance(state: AppState) -> str:
-    result = state.get("response_governance_result") or {}
-    if result.get("status") == "block":
+def route_after_response_persistence(state: AppState) -> str:
+    result = state.get("response_persistence_result") or {}
+    next_agent = result.get("next_agent", "end")
+    if next_agent == "human_approval":
         return "human_approval"
     return END
 
@@ -50,17 +47,18 @@ def build_graph(
     triage_agent = build_triage_agent_graph(
         client=azure,
         event_writer=governance_repository,
+        store=PipelineStore(cloud_repository),
     )
-    policy_agent = build_policy_agent_graph(azure)
-    policy_persistence = PolicyPersistenceNode(PipelineStore(cloud_repository))
-    response_governance = ResponseGovernanceNode()
+    policy_agent = build_policy_agent_graph(
+        azure,
+        store=PipelineStore(cloud_repository),
+    )
+    response_agent = build_response_agent_graph(store=PipelineStore(cloud_repository))
 
     builder.add_node("triage_agent", triage_agent)
     builder.add_node("policy_agent", policy_agent)
-    builder.add_node("policy_persistence", policy_persistence)
     builder.add_node("refund_agent", refund_node)
-    builder.add_node("response_agent", response_node)
-    builder.add_node("response_governance", response_governance)
+    builder.add_node("response_agent", response_agent)
     builder.add_node("human_approval", human_approval_node)
 
     builder.add_edge(START, "triage_agent")
@@ -73,9 +71,8 @@ def build_graph(
             "human_approval": "human_approval",
         },
     )
-    builder.add_edge("policy_agent", "policy_persistence")
     builder.add_conditional_edges(
-        "policy_persistence",
+        "policy_agent",
         map_policy_handoff_to_parent_node,
         {
             "refund_agent": "refund_agent",
@@ -86,10 +83,9 @@ def build_graph(
 
     builder.add_edge("refund_agent", "response_agent")
     builder.add_edge("human_approval", "response_agent")
-    builder.add_edge("response_agent", "response_governance")
     builder.add_conditional_edges(
-        "response_governance",
-        route_after_response_governance,
+        "response_agent",
+        route_after_response_persistence,
         {
             "human_approval": "human_approval",
             END: END,

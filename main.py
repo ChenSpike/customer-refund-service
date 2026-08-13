@@ -37,8 +37,7 @@ result = graph.invoke({
     "user_id":              USER_ID,
     "message":              MESSAGE,
     "conversation_history": [],
-    "request_context":      {"trace_id": trace_id, "ticket_id": ticket_id},
-    "buggy_db":             False,
+    "request_context":      {"trace_id": trace_id, "ticket_id": ticket_id, "buggy_db": False},
     "trace_id":             trace_id,
     "ticket_id":            ticket_id,
 })

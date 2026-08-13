@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.mappers.policy_mapper import determine_policy_handoff
 from app.state import AppState
+from db.pipeline_store import PipelineStore, PolicyPersistenceNode
 
 from .azure import AzureJsonClient
 from .governance_node import GovernanceNode
@@ -31,6 +32,8 @@ def policy_handoff_node(state: AppState) -> dict:
 
 def build_policy_agent_graph(
     client: AzureJsonClient | None = None,
+    *,
+    store: PipelineStore | None = None,
 ):
     """Build the policy subgraph using the same AppState-native nodes as the main graph."""
 
@@ -42,8 +45,13 @@ def build_policy_agent_graph(
     builder.add_node("policy", policy_node)
     builder.add_node("policy_governance", policy_governance_node)
     builder.add_node("policy_handoff", policy_handoff_node)
+    builder.add_node(
+        "policy_persistence",
+        PolicyPersistenceNode(store or PipelineStore.from_env()),
+    )
     builder.add_edge(START, "policy")
     builder.add_edge("policy", "policy_governance")
     builder.add_edge("policy_governance", "policy_handoff")
-    builder.add_edge("policy_handoff", END)
+    builder.add_edge("policy_handoff", "policy_persistence")
+    builder.add_edge("policy_persistence", END)
     return builder.compile(name="policy_agent")

@@ -465,6 +465,76 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	def persist_agent_handoff(
+		self,
+		*,
+		trace_id: str,
+		ticket_id: str,
+		from_agent: str,
+		to_agent: str,
+		input_payload: dict[str, Any],
+		output_payload: dict[str, Any],
+		input_tokens: int = 0,
+		output_tokens: int = 0,
+		audit_event_type: str,
+		workflow_status: str,
+		current_agent: str,
+	) -> str:
+		connection = self._connect()
+		try:
+			connection.start_transaction()
+			cursor = connection.cursor()
+			handoff_id = self._upsert_generic_handoff(
+				cursor,
+				trace_id=trace_id,
+				ticket_id=ticket_id,
+				from_agent=from_agent,
+				to_agent=to_agent,
+				input_payload=input_payload,
+				output_payload=output_payload,
+				input_tokens=input_tokens,
+				output_tokens=output_tokens,
+			)
+			cursor.execute(
+				"""
+				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
+				VALUES (%s, %s, %s, %s)
+				""",
+				(
+					trace_id,
+					audit_event_type,
+					from_agent,
+					json.dumps(
+						{
+							"handoff_id": handoff_id,
+							"from_agent": from_agent,
+							"to_agent": to_agent,
+							"input": input_payload,
+							"output": output_payload,
+							"input_tokens": input_tokens,
+							"output_tokens": output_tokens,
+						},
+						ensure_ascii=False,
+					),
+				),
+			)
+			cursor.execute(
+				"""
+				UPDATE workflow_runs
+				SET status = %s, current_agent = %s, updated_at = CURRENT_TIMESTAMP
+				WHERE trace_id = %s
+				""",
+				(workflow_status, current_agent, trace_id),
+			)
+			_require_workflow_row(cursor, trace_id)
+			connection.commit()
+			return handoff_id
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			connection.close()
+
 	def reset_policy_agent_data(self) -> dict[str, int]:
 		"""Prepare the 20 benchmark workflows for an idempotent Policy rerun.
 
@@ -795,6 +865,57 @@ class GCPRepository:
 				output.model_dump_json(),
 				usage.input_tokens,
 				usage.output_tokens,
+			),
+		)
+		return handoff_id
+
+	def _upsert_generic_handoff(
+		self,
+		cursor: Any,
+		*,
+		trace_id: str,
+		ticket_id: str,
+		from_agent: str,
+		to_agent: str,
+		input_payload: dict[str, Any],
+		output_payload: dict[str, Any],
+		input_tokens: int,
+		output_tokens: int,
+	) -> str:
+		cursor.execute(
+			"""
+			SELECT handoff_id FROM agent_handoffs
+			WHERE trace_id = %s AND ticket_id = %s AND from_agent = %s
+			ORDER BY created_at DESC
+			""",
+			(trace_id, ticket_id, from_agent),
+		)
+		existing = [row[0] for row in cursor.fetchall()]
+		if len(existing) > 1:
+			raise CloudDatabaseError(f"{trace_id}: multiple {from_agent} handoffs already exist")
+		handoff_id = existing[0] if existing else self._next_handoff_id(cursor)
+		cursor.execute(
+			"""
+			INSERT INTO agent_handoffs (
+			  handoff_id, trace_id, ticket_id, from_agent, to_agent,
+			  input_json, output_json, input_tokens, output_tokens
+			)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+			ON DUPLICATE KEY UPDATE
+			  to_agent = VALUES(to_agent), input_json = VALUES(input_json),
+			  output_json = VALUES(output_json), input_tokens = VALUES(input_tokens),
+			  output_tokens = VALUES(output_tokens), created_at = CURRENT_TIMESTAMP
+			""",
+			(
+				handoff_id,
+				trace_id,
+				ticket_id,
+				from_agent,
+				to_agent,
+				json.dumps(input_payload, ensure_ascii=False),
+				json.dumps(output_payload, ensure_ascii=False),
+				input_tokens,
+				output_tokens,
 			),
 		)
 		return handoff_id

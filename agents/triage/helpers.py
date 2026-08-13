@@ -30,5 +30,6 @@ def inputs_from_state(state) -> tuple[str, str | None, bool]:
     case = state.get("case") or {}
     message = state.get("message", case.get("message"))
     user_id = state.get("user_id", case.get("user_id"))
-    buggy = state.get("buggy_db", case.get("buggy_db", False))
+    request_context = state.get("request_context") or {}
+    buggy = bool(request_context.get("buggy_db", False))
     return message, user_id, buggy

@@ -85,18 +85,31 @@ class GovernanceNode(BaseGovernanceNode):
         if governance_result["status"] == "block":
             patch["human_review_required"] = True
             patch["workflow_status"] = "waiting_human"
+            patch["review_trigger_stage"] = "policy"
+            patch["review_trigger_reason"] = "governance_block"
         return patch
 
 
 def _policy_governance_result_from_assessment(
     assessment: GovernanceAssessment,
 ) -> dict[str, Any]:
+    all_checks = [
+        {
+            "name": finding.flag,
+            "status": "block",
+            "detail": finding.detail,
+            "evidence": {},
+            "source": finding.source,
+        }
+        for finding in assessment.findings
+    ]
     return {
         "stage": "policy",
         "status": "block" if assessment.findings else "allow",
         "semantic_drift_score": assessment.governance.semantic_drift_score,
         "flags": assessment.governance.flags,
         "findings": [finding.model_dump(mode="json") for finding in assessment.findings],
+        "all_checks": all_checks,
     }
 
 

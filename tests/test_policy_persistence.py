@@ -46,6 +46,7 @@ class RecordingRepository:
         self.source = source
         self.fail = fail
         self.persisted: list[tuple] = []
+        self.agent_handoffs: list[dict[str, object]] = []
         self.failures: list[tuple[str, Exception]] = []
 
     def fetch_source_handoffs(self, _mode, _trace_id=None):
@@ -57,24 +58,28 @@ class RecordingRepository:
             raise RuntimeError("database write failed")
         return "21"
 
+    def persist_agent_handoff(self, **kwargs):
+        self.agent_handoffs.append(kwargs)
+        if self.fail:
+            raise RuntimeError("database write failed")
+        return "31"
+
     def record_failure(self, trace_id, error):
         self.failures.append((trace_id, error))
 
 
 def test_parent_policy_path_is_json_serializable_and_persists_once() -> None:
     policy_input = make_input()
-    graph = build_policy_agent_graph(FakeAzureClient(make_policy_result(policy_input)))
     repository = RecordingRepository()
+    graph = build_policy_agent_graph(
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(repository),
+    )
     builder = StateGraph(AppState)
     builder.add_node("policy_agent", graph)
-    builder.add_node(
-        "policy_persistence",
-        PolicyPersistenceNode(PipelineStore(repository)),
-    )
     builder.add_node("downstream", lambda _state: {"final_outcome": "routed"})
     builder.add_edge(START, "policy_agent")
-    builder.add_edge("policy_agent", "policy_persistence")
-    builder.add_edge("policy_persistence", "downstream")
+    builder.add_edge("policy_agent", "downstream")
     builder.add_edge("downstream", END)
 
     result = builder.compile().invoke(_state(policy_input))
@@ -92,10 +97,113 @@ def test_parent_policy_path_is_json_serializable_and_persists_once() -> None:
     assert result["final_outcome"] == "routed"
 
 
+def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
+    repository = RecordingRepository()
+
+    artifacts = PipelineStore(repository).persist_triage_state(
+        {
+            "trace_id": "TRACE-TRIAGE-001",
+            "ticket_id": "TICKET-TRIAGE-001",
+            "message": "My item arrived damaged",
+            "user_id": "CUST-001",
+            "triage_output": {"customer_request": {"refund_reason": "damaged"}},
+            "triage_governance_result": {"status": "allow", "findings": []},
+            "triage_handoff": "policy",
+            "llm_input_tokens": 12,
+            "llm_output_tokens": 4,
+        }
+    )
+
+    assert artifacts.state_patch()["triage_persistence_result"] == {
+        "handoff_id": "31",
+        "trace_id": "TRACE-TRIAGE-001",
+        "next_agent": "policy",
+    }
+    assert repository.agent_handoffs == [
+        {
+            "trace_id": "TRACE-TRIAGE-001",
+            "ticket_id": "TICKET-TRIAGE-001",
+            "from_agent": "triage_agent",
+            "to_agent": "policy",
+            "input_payload": {
+                "message": "My item arrived damaged",
+                "user_id": "CUST-001",
+                "requested_order_id": None,
+            },
+            "output_payload": {
+                "triage_output": {"customer_request": {"refund_reason": "damaged"}},
+                "triage_governance_result": {"status": "allow", "findings": []},
+                "triage_handoff": "policy",
+            },
+            "input_tokens": 12,
+            "output_tokens": 4,
+            "audit_event_type": "triage_agent_evaluated",
+            "workflow_status": "running",
+            "current_agent": "policy",
+        }
+    ]
+
+
+def test_response_persistence_writes_backend_and_returns_handoff_id() -> None:
+    repository = RecordingRepository()
+
+    artifacts = PipelineStore(repository).persist_response_state(
+        {
+            "trace_id": "TRACE-RESP-001",
+            "ticket_id": "TICKET-RESP-001",
+            "message": "Thanks",
+            "user_id": "CUST-001",
+            "response_result": {
+                "response": {"body": "Refund completed.", "tone": "empathetic"},
+                "final_outcome": "approved",
+                "workflow_status": "completed",
+            },
+            "response_governance_result": {"status": "allow", "findings": []},
+            "response_handoff": "end",
+            "llm_input_tokens": 8,
+            "llm_output_tokens": 3,
+        }
+    )
+
+    assert artifacts.state_patch()["response_persistence_result"] == {
+        "handoff_id": "31",
+        "trace_id": "TRACE-RESP-001",
+        "next_agent": "end",
+    }
+    assert repository.agent_handoffs == [
+        {
+            "trace_id": "TRACE-RESP-001",
+            "ticket_id": "TICKET-RESP-001",
+            "from_agent": "response_agent",
+            "to_agent": "end",
+            "input_payload": {
+                "message": "Thanks",
+                "user_id": "CUST-001",
+                "human_review": None,
+            },
+            "output_payload": {
+                "response_result": {
+                    "response": {"body": "Refund completed.", "tone": "empathetic"},
+                    "final_outcome": "approved",
+                    "workflow_status": "completed",
+                },
+                "response_governance_result": {"status": "allow", "findings": []},
+                "response_handoff": "end",
+            },
+            "input_tokens": 8,
+            "output_tokens": 3,
+            "audit_event_type": "response_agent_evaluated",
+            "workflow_status": "completed",
+            "current_agent": "completed",
+        }
+    ]
+
+
 def test_parent_additive_state_receives_policy_deltas_exactly_once() -> None:
     policy_input = make_input()
     policy_graph = build_policy_agent_graph(
-        FakeAzureClient(make_policy_result(policy_input))
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(RecordingRepository()),
     )
     builder = StateGraph(AppState)
     builder.add_node("policy_agent", policy_graph)
@@ -133,7 +241,8 @@ def test_parent_additive_state_receives_policy_deltas_exactly_once() -> None:
 def test_persistence_failure_stops_downstream_routing() -> None:
     policy_input = make_input()
     state = build_policy_agent_graph(
-        FakeAzureClient(make_policy_result(policy_input))
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(RecordingRepository()),
     ).invoke(_state(policy_input))
     repository = RecordingRepository(fail=True)
     reached_downstream: list[bool] = []
@@ -176,11 +285,10 @@ def test_persistence_precedes_every_policy_route(
     builder = StateGraph(AppState)
     builder.add_node(
         "policy_agent",
-        build_policy_agent_graph(FakeAzureClient(policy_result, governance)),
-    )
-    builder.add_node(
-        "policy_persistence",
-        PolicyPersistenceNode(PipelineStore(repository)),
+        build_policy_agent_graph(
+            FakeAzureClient(policy_result, governance),
+            store=PipelineStore(repository),
+        ),
     )
     for agent in ("refund_agent", "response_agent", "human_approval"):
         builder.add_node(
@@ -189,9 +297,8 @@ def test_persistence_precedes_every_policy_route(
         )
         builder.add_edge(agent, END)
     builder.add_edge(START, "policy_agent")
-    builder.add_edge("policy_agent", "policy_persistence")
     builder.add_conditional_edges(
-        "policy_persistence",
+        "policy_agent",
         map_policy_handoff_to_parent_node,
         {
             "refund_agent": "refund_agent",
@@ -210,7 +317,8 @@ def test_persistence_precedes_every_policy_route(
 def test_persistence_rejects_handoff_that_differs_from_validated_output() -> None:
     policy_input = make_input()
     state = build_policy_agent_graph(
-        FakeAzureClient(make_policy_result(policy_input))
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(RecordingRepository()),
     ).invoke(_state(policy_input))
     state["policy_handoff"] = "response"
     repository = RecordingRepository()
@@ -224,7 +332,8 @@ def test_persistence_rejects_handoff_that_differs_from_validated_output() -> Non
 def test_precedent_context_is_read_only_from_nested_policy_context() -> None:
     policy_input = make_input()
     state = build_policy_agent_graph(
-        FakeAzureClient(make_policy_result(policy_input))
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(RecordingRepository()),
     ).invoke(_state(policy_input))
     state["precedent_context"] = state["policy_context"]["precedent_context"]
     del state["policy_context"]["precedent_context"]
@@ -238,11 +347,11 @@ def test_standalone_and_parent_paths_produce_equivalent_artifacts() -> None:
     payload = _triage_payload(policy_input)
     parent_repository = RecordingRepository()
     parent_graph = build_policy_agent_graph(
-        FakeAzureClient(make_policy_result(policy_input))
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(parent_repository),
     )
     parent_state = parent_graph.invoke(_state(policy_input))
     parent_output = policy_output_from_state(parent_state)
-    parent_artifacts = PipelineStore(parent_repository).persist_policy_state(parent_state)
 
     source = SourceHandoff(
         handoff_id="1",
@@ -253,14 +362,17 @@ def test_standalone_and_parent_paths_produce_equivalent_artifacts() -> None:
     standalone_repository = RecordingRepository(source)
     service = PolicyAgentService(
         standalone_repository,
-        build_policy_agent_graph(FakeAzureClient(make_policy_result(policy_input))),
+        build_policy_agent_graph(
+            FakeAzureClient(make_policy_result(policy_input)),
+            store=PipelineStore(standalone_repository),
+        ),
     )
 
     processed = service.run("benchmark")
 
     assert len(processed) == 1
     assert processed[0].output == parent_output
-    assert processed[0].handoff_id == parent_artifacts.handoff_id == "21"
+    assert processed[0].handoff_id == parent_state["policy_persistence_result"]["handoff_id"] == "21"
     assert processed[0].usage == TokenUsage(input_tokens=20, output_tokens=8)
     assert len(parent_repository.persisted) == 1
     assert len(standalone_repository.persisted) == 1

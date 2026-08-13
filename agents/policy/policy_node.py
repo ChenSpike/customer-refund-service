@@ -261,7 +261,7 @@ def policy_output_from_state(
     reconstructed = reconstructed or reconstruct_policy_state(state)
     policy_result = reconstructed.policy_result
     governance_result = _json_object(state, "policy_governance_result")
-    _require_exact_keys(
+    _require_required_keys(
         governance_result,
         "policy_governance_result",
         {"stage", "status", "semantic_drift_score", "flags", "findings"},
@@ -356,6 +356,14 @@ def _json_object(state: AppState, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be a JSON object")
     return value
+
+
+def _require_required_keys(value: dict[str, Any], name: str, expected: set[str]) -> None:
+    actual = set(value)
+    missing = sorted(expected - actual)
+    if missing:
+        extra = sorted(actual - expected)
+        raise ValueError(f"{name} keys mismatch; missing={missing}, extra={extra}")
 
 
 def _require_exact_keys(value: dict[str, Any], name: str, expected: set[str]) -> None:

@@ -60,5 +60,9 @@ class ResponseGovernanceNode(BaseGovernanceNode):
         return {
             "current_stage":              "response_governance",
             "response_governance_result": payload,
+            "human_review_required":      payload["status"] == "block",
+            "workflow_status":            "waiting_human" if payload["status"] == "block" else state.get("workflow_status", "completed"),
+            "review_trigger_stage":       self.STAGE if payload["status"] == "block" else state.get("review_trigger_stage", ""),
+            "review_trigger_reason":      "governance_block" if payload["status"] == "block" else state.get("review_trigger_reason", ""),
             "audit_trail":                [statement.model_dump(mode="json")],
         }

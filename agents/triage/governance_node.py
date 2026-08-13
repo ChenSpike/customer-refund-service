@@ -130,9 +130,15 @@ class GovernanceNode(BaseGovernanceNode):
         deterministic_result = build_check_result_payload(self.name, findings)
         if self.reviewer is None:
             patch = {
+                "current_stage": "triage_governance",
                 "triage_governance_result": deterministic_result,
                 "risk_flags": _risk_flags_from_checks(findings),
             }
+            if deterministic_result["status"] == "block":
+                patch["human_review_required"] = True
+                patch["workflow_status"] = "waiting_human"
+                patch["review_trigger_stage"] = self.name
+                patch["review_trigger_reason"] = "governance_block"
             if self.event_writer is not None:
                 statement = build_statement_from_check_results(
                     trace_id=state.get("trace_id", "unknown"),
@@ -182,6 +188,11 @@ class GovernanceNode(BaseGovernanceNode):
                 }
             ],
         }
+        if result["status"] == "block":
+            patch["human_review_required"] = True
+            patch["workflow_status"] = "waiting_human"
+            patch["review_trigger_stage"] = self.name
+            patch["review_trigger_reason"] = "governance_block"
         if self.event_writer is not None:
             statement = (
                 build_statement_from_assessment(

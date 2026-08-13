@@ -2,12 +2,19 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 
+class GovernanceResult(TypedDict, total=False):
+    stage: str
+    status: str
+    findings: list[dict[str, Any]]
+    all_checks: list[dict[str, Any]]
+    flags: list[str]
+
+
 class AppState(TypedDict, total=False):
     # input
     user_id: str
     message: str
     request_context: dict[str, Any]
-    buggy_db: bool
 
     # ids
     trace_id: str
@@ -28,17 +35,19 @@ class AppState(TypedDict, total=False):
     final_outcome: str
     requested_order_id: str
     clarification_question: str
+    review_trigger_stage: str
+    review_trigger_reason: str
 
     # triage outputs
     order_lookup_result: dict[str, Any]
     triage_output: dict[str, Any]
     triage_handoff: str
+    triage_persistence_result: dict[str, Any]
 
     # governance
-    governance_result: dict[str, Any]
-    triage_governance_result: dict[str, Any]
-    policy_governance_result: dict[str, Any]
-    response_governance_result: dict[str, Any]
+    triage_governance_result: GovernanceResult
+    policy_governance_result: GovernanceResult
+    response_governance_result: GovernanceResult
     risk_flags: Annotated[list[dict[str, Any]], operator.add]
 
     # policy outputs
@@ -51,6 +60,8 @@ class AppState(TypedDict, total=False):
     # downstream placeholders
     refund_result: dict[str, Any]
     response_result: dict[str, Any]
+    response_handoff: str
+    response_persistence_result: dict[str, Any]
     human_review: dict[str, Any]
 
     # observability

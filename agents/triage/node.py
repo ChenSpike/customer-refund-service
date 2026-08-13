@@ -44,14 +44,10 @@ def triage_node(state) -> dict:
             "user_id": user_id,
             "llm_input_tokens": 0,
             "llm_output_tokens": 0,
-            "awaiting_order_id": False,
-            "content_filter_blocked": True,
-            "injection_flag": True,
-            "governance_result": {
+            "user_action_required": False,
+            "content_filter_result": {
                 "status": "block",
-                "rule": "ASI07",
-                "failed_check": "content_filter",
-                "detail": "Azure content filter rejected the message.",
+                "reason": "Azure content filter rejected the message.",
             },
             "conversation_history": history + [user_msg],
         }
@@ -70,10 +66,6 @@ def triage_node(state) -> dict:
             "user_id": user_id,
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
-            "awaiting_order_id": True,
-            # Declared AppState fields the router/response node key off. The router
-            # routes need-info on user_action_required and response_node builds the
-            # reply from it; awaiting_order_id alone is not declared and is dropped.
             "user_action_required": True,
             "missing_fields": ["order_id"],
             "clarification_question": question,
@@ -91,10 +83,6 @@ def triage_node(state) -> dict:
             "user_id": user_id,
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
-            "awaiting_order_id": True,
-            # Declared AppState fields the router/response node key off. The router
-            # routes need-info on user_action_required and response_node builds the
-            # reply from it; awaiting_order_id alone is not declared and is dropped.
             "user_action_required": True,
             "missing_fields": ["order_id"],
             "clarification_question": question,
@@ -153,7 +141,6 @@ def triage_node(state) -> dict:
         "user_id": user_id,
         "llm_input_tokens": total_input_tokens,
         "llm_output_tokens": total_output_tokens,
-        "awaiting_order_id": False,
         "order_lookup_result": raw_result,
         "triage_output": triage_output,
         "conversation_history": history + [user_msg, assistant_msg(extract_text(second))],

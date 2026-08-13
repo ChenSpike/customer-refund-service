@@ -128,9 +128,9 @@ def test_node_blocks_pii_and_semantic_drift_from_shared_checkers():
 # ── router reads the per-stage key ────────────────────────────────────────────
 
 @pytest.mark.parametrize("state, expected", [
-    ({"triage_handoff": "human_review"}, "human_approval"),
-    ({"triage_handoff": "response"}, "response_agent"),
-    ({"triage_handoff": "policy"}, "policy"),
+    ({"triage_persistence_result": {"next_agent": "human_approval"}}, "human_approval"),
+    ({"triage_persistence_result": {"next_agent": "response_agent"}}, "response_agent"),
+    ({"triage_persistence_result": {"next_agent": "policy"}}, "policy"),
 ])
 def test_route_after_triage_matrix(state, expected):
     assert map_triage_handoff_to_parent_node(state) == expected
@@ -138,5 +138,5 @@ def test_route_after_triage_matrix(state, expected):
 
 def test_mapper_sees_block_from_node():
     patch = GovernanceNode()(_state(leaked_order()))
-    patch["triage_handoff"] = "human_review"
+    patch["triage_persistence_result"] = {"next_agent": "human_approval"}
     assert map_triage_handoff_to_parent_node(patch) == "human_approval"

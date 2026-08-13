@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.state import AppState
 from tools.azure_client import client
 from tools.llm_helpers import extract_text, is_content_filter, usage_tokens
 
@@ -59,25 +60,6 @@ def _tone(final_outcome: str) -> str:
     return "formal"
 
 
-def _determine_outcome(state: dict[str, Any], decision: str, refund_status: str) -> tuple[str, str]:
-    """Returns (final_outcome, workflow_status)."""
-    if state.get("user_action_required"):
-        return "need_info", "waiting_user"
-    if refund_status == "success":
-        return ("partial_refund" if decision == "partial_refund" else "approved"), "completed"
-    if refund_status == "failed":
-        return "refund_failed", "completed"
-    if decision == "deny":
-        return "denied", "completed"
-    if decision == "partial_refund":
-        return "partial_refund", "completed"
-    if decision == "request_info":
-        return "need_info", "waiting_user"
-    if decision == "manual_review":
-        return "manual_review", "waiting_human"
-    return state.get("final_outcome", "manual_review"), "completed"
-
-
 def build_response_payload(state: AppState) -> dict:
     if state.get("user_action_required"):
         return {
@@ -87,6 +69,28 @@ def build_response_payload(state: AppState) -> dict:
             ),
             "final_outcome": "need_info",
             "workflow_status": "waiting_user",
+        }
+
+    human_review = state.get("human_review") or {}
+    if human_review.get("status") == "approved":
+        approved_next_agent = human_review.get("approved_next_agent")
+        if approved_next_agent == "refund_agent":
+            return {
+                "message": "Your request was approved by our review team and your refund is now being processed.",
+                "final_outcome": "approved",
+                "workflow_status": "completed",
+            }
+        return {
+            "message": "Our review team has completed the review of your request.",
+            "final_outcome": state.get("final_outcome", "approved") or "approved",
+            "workflow_status": "completed",
+        }
+
+    if human_review.get("status") == "rejected":
+        return {
+            "message": "Our review team has completed the review of your request and we are unable to approve the refund.",
+            "final_outcome": "denied",
+            "workflow_status": "completed",
         }
 
     refund_result = state.get("refund_result", {})
