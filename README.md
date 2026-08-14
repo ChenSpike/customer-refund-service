@@ -425,7 +425,7 @@ Fill in `DB_HOST`, `DB_USER`, and `DB_PASSWORD` in `.env` with the shared GCP My
 ### 2. Initialize the database (only if `main_db` doesn't already have the schema)
 
 ```bash
-mysql -h $DB_HOST -u $DB_USER -p main_db < schema.sql
+mysql -h $DB_HOST -u $DB_USER -p main_db
 # you'll be prompted for the password, get it from your team's secret manager
 ```
 
@@ -435,7 +435,7 @@ This is idempotent (`CREATE TABLE` / `CREATE DATABASE IF NOT EXISTS`), safe to r
 
 ```bash
 pip install -r requirements.txt
-python main.py
+uvicorn main:app --reload
 # Server runs on http://localhost:8000
 # Interactive API docs: http://localhost:8000/docs
 ```
