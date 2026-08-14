@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from textwrap import dedent
@@ -490,7 +492,8 @@ def _policy_instructions(policy_context: str) -> str:
         assessment conflicts because the conflict itself activates that rule. Use the policy gaps list for
         missing_fact, policy_conflict, and low_confidence conditions. For request_info, each
         missing_info_to_request item must be human-readable and contain the exact missing fact path token. Preserve case
-        and customer_request exactly.
+        and customer_request exactly. Compute every date window relative to the explicit evaluation_date supplied with
+        the validated input; do not use model training time or infer a different current date.
 
         Precedents are advisory and never override the policy knowledge base. Similarity may reference only supplied
         precedent IDs. Use precedent_comparison_decision for qualitative comparison; it must equal an actionable final
@@ -521,6 +524,9 @@ def _policy_instructions(policy_context: str) -> str:
 
 def _policy_input_message(policy_input: PolicyAgentInput, precedents: PrecedentContext) -> str:
     payload = {
+        # Refund windows cannot be evaluated reproducibly from purchase_date
+        # alone. Demo runs pin this from their fixture; ordinary runs use today.
+        "evaluation_date": policy_evaluation_date().isoformat(),
         "policy_input": policy_input.model_dump(mode="json"),
         "validated_fact_presence": {
             path: _fact_is_present(policy_input, path) for path in sorted(ALLOWED_FACT_PATHS)
@@ -538,6 +544,16 @@ def _policy_input_message(policy_input: PolicyAgentInput, precedents: PrecedentC
         indent=2,
         ensure_ascii=False,
     )
+
+
+def policy_evaluation_date() -> date:
+    configured = os.getenv("POLICY_EVALUATION_DATE")
+    if not configured:
+        return date.today()
+    try:
+        return date.fromisoformat(configured)
+    except ValueError as error:
+        raise ValueError("POLICY_EVALUATION_DATE must use YYYY-MM-DD") from error
 
 
 def validate_policy_result(

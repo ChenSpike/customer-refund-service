@@ -277,6 +277,14 @@ def test_azure_input_includes_authoritative_structural_fact_presence() -> None:
     assert presence["order_facts.prior_refund_total"] is True
 
 
+def test_azure_input_includes_pinned_evaluation_date(monkeypatch) -> None:
+    monkeypatch.setenv("POLICY_EVALUATION_DATE", "2026-07-01")
+    payload = json.loads(
+        _policy_input_message(make_input(), unavailable_context()).split("\n", 1)[1]
+    )
+    assert payload["evaluation_date"] == "2026-07-01"
+
+
 def test_azure_format_uses_strict_discrete_confidence_schema() -> None:
     response_format = _strict_json_format(PolicyReasoningResult)
 
@@ -337,4 +345,36 @@ def test_policy_repair_replaces_complete_confidence_evidence() -> None:
     repaired = json.loads(_apply_json_repair(result.model_dump_json(), repair))
 
     assert repaired["decision"]["confidence"] == 2
+    assert repaired["decision"]["confidence_evidence"]["policy_support"] == "minor_ambiguity"
+
+
+def test_policy_repair_authoritative_confidence_wins_over_replacements() -> None:
+    result = make_policy_result(make_input())
+    payload = result.model_dump(mode="json")
+    evidence = payload["decision"]["confidence_evidence"]
+    evidence["policy_support"] = "minor_ambiguity"
+    evidence["minor_ambiguities"] = ["A minor ambiguity remains."]
+    repair = AzurePolicyRepair.model_validate(
+        {
+            "confidence_correction": {
+                "confidence": 2,
+                "confidence_level": "moderate",
+                "confidence_evidence": evidence,
+                "precedent_evidence": payload["decision"]["precedent_evidence"],
+            },
+            "replacements": [
+                {"path": "/decision/confidence", "value_json": "0"},
+                {"path": "/decision/confidence_level", "value_json": '"insufficient"'},
+                {
+                    "path": "/decision/confidence_evidence/policy_support",
+                    "value_json": '"weak"',
+                },
+            ],
+        }
+    )
+
+    repaired = json.loads(_apply_json_repair(result.model_dump_json(), repair))
+
+    assert repaired["decision"]["confidence"] == 2
+    assert repaired["decision"]["confidence_level"] == "moderate"
     assert repaired["decision"]["confidence_evidence"]["policy_support"] == "minor_ambiguity"

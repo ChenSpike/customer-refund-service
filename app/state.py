@@ -59,6 +59,7 @@ class AppState(TypedDict, total=False):
 
     # downstream placeholders
     refund_result: dict[str, Any]
+    refund_persistence_result: dict[str, Any]
     response_result: dict[str, Any]
     response_handoff: str
     response_persistence_result: dict[str, Any]

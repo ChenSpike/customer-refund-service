@@ -46,8 +46,10 @@ class RecordingRepository:
         self.source = source
         self.fail = fail
         self.persisted: list[tuple] = []
+        self.refunds: list[dict[str, object]] = []
         self.agent_handoffs: list[dict[str, object]] = []
         self.failures: list[tuple[str, Exception]] = []
+        self.approvals: list[dict[str, object]] = []
 
     def fetch_source_handoffs(self, _mode, _trace_id=None):
         return [self.source] if self.source is not None else []
@@ -63,6 +65,18 @@ class RecordingRepository:
         if self.fail:
             raise RuntimeError("database write failed")
         return "31"
+
+    def persist_refund_result(self, **kwargs):
+        self.refunds.append(kwargs)
+        if self.fail:
+            raise RuntimeError("database write failed")
+        return "REFUND-TX-1", "32"
+
+    def ensure_human_approval(self, **kwargs):
+        self.approvals.append(kwargs)
+        if self.fail:
+            raise RuntimeError("database write failed")
+        return "APPROVAL-1"
 
     def record_failure(self, trace_id, error):
         self.failures.append((trace_id, error))
@@ -117,14 +131,14 @@ def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
     assert artifacts.state_patch()["triage_persistence_result"] == {
         "handoff_id": "31",
         "trace_id": "TRACE-TRIAGE-001",
-        "next_agent": "policy",
+        "next_agent": "policy_agent",
     }
     assert repository.agent_handoffs == [
         {
             "trace_id": "TRACE-TRIAGE-001",
             "ticket_id": "TICKET-TRIAGE-001",
             "from_agent": "triage_agent",
-            "to_agent": "policy",
+            "to_agent": "policy_agent",
             "input_payload": {
                 "message": "My item arrived damaged",
                 "user_id": "CUST-001",
@@ -139,7 +153,7 @@ def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
             "output_tokens": 4,
             "audit_event_type": "triage_agent_evaluated",
             "workflow_status": "running",
-            "current_agent": "policy",
+            "current_agent": "policy_agent",
         }
     ]
 

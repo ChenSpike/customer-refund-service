@@ -168,7 +168,7 @@ def test_live_triage_to_response_persists_backend_rows(monkeypatch) -> None:
         ("triage_agent", "triage_agent_evaluated"),
         ("response_agent", "response_agent_evaluated"),
     ]
-    assert _fetch_workflow(repository, trace_id) == ("waiting_user", "completed")
+    assert _fetch_workflow(repository, trace_id) == ("waiting_user", "triage_agent")
 
 
 def test_live_triage_human_review_then_response_persists_backend_rows(monkeypatch) -> None:

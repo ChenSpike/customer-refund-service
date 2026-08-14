@@ -1,53 +1,74 @@
-# Refund frontend (`refund_app`)
+# Final refund demo adapter
 
-A customer-facing refund request UI + a thin FastAPI backend over the
-state-driven pipeline (`app.graph.build_graph`). One endpoint, three modes
-selected by env vars — the frontend contract is identical across all of them,
-so going live is an env flip, not a code change.
+The API and CLI expose only the canonical `demo01` through `demo20` records in
+`database/fixtures/demo_cases.json`. They reuse each case's seeded trace,
+ticket, customer, order, and original message. Neither entry point creates a
+new root ticket or workflow run.
 
 ## Modes
 
-| `REFUND_AZURE` | `REFUND_DB` | Behaviour |
-|----------------|-------------|-----------|
-| `fake` (default) | `fake` | Deterministic simulator. No network, no credentials. Demos the governance paths (approve / deny / need-info / ASI07 leak → human review). |
-| `real` | `fake` | Real `build_graph` + real Azure (real LLM reasoning) + in-memory repo + fixture orders. No DB writes. |
-| `real` | `real` | Real pipeline against the live team `main_db`. Bootstraps the `tickets` + `workflow_runs` rows, then persists handoffs / governance / response. Writes to shared infra. |
+| Mode | Behaviour |
+|---|---|
+| `offline` (default) | Deterministic results from the 20-case manifest. No DB, Azure, or network call. |
+| `live` | Invokes the real state-driven graph after read-only verification that the target is database `final` and its root workflow set is exactly `demo01` through `demo20`. |
 
-## Run
+The runner supplies the UI-selected canonical order explicitly in both
+`requested_order_id` and `request_context.selected_order_id`. This preserves
+the fixture message for missing/wrong-ID scenarios such as `demo04`, `demo10`,
+`demo14`, and `demo18`. It also scopes `POLICY_EVALUATION_DATE` to the fixture's
+evaluation date for each execution and restores the prior environment value.
 
-```bash
-# offline demo (default)
-python -m uvicorn refund_app.api:app --port 8077
-# open http://localhost:8077
+## Safe CLI
 
-# real AI, no DB (needs working Azure creds in .env; spends tokens)
-REFUND_AZURE=real REFUND_DB=fake python -m uvicorn refund_app.api:app --port 8077
+```powershell
+# No arguments prints help and performs no cloud action.
+.venv\Scripts\python.exe main.py
 
-# full live (needs the DB reachable + your IP whitelisted on Cloud SQL)
-REFUND_AZURE=real REFUND_DB=real python -m uvicorn refund_app.api:app --port 8077
+# Offline, deterministic execution.
+.venv\Scripts\python.exe main.py list
+.venv\Scripts\python.exe main.py run demo01
+.venv\Scripts\python.exe main.py run-all
+
+# Live graph: both flags are intentional safeguards.
+$env:MYSQL_DATABASE = "final"
+.venv\Scripts\python.exe main.py --mode live --confirm-live final run demo01
 ```
 
-## Env
+`run-all` isolates failures and reports workflow and total timings per case.
+Live execution can write downstream audit, handoff, approval, response, and
+refund artifacts for the existing roots, but never inserts a new root case.
 
-Read from the repo-root `.env` (via `python-dotenv`). The backend normalises two
-known mismatches at startup so the existing `.env` works unchanged:
+## API
 
-- `AZURE_OPENAI_ENDPOINT` is trimmed to the resource base URL (the SDK appends
-  the `/openai/responses` path itself).
-- `GCP_MYSQL_*` keys are bridged to the `MYSQL_*` names the refactor DB layer
-  reads. `AZURE_OPENAI_DEPLOYMENT` defaults to `gpt-5.4`.
+```powershell
+# Offline by default.
+.venv\Scripts\python.exe -m uvicorn refund_app.api:app --port 8077
+# Then open http://127.0.0.1:8077; the page loads exactly demo01-demo20.
 
-## Files
+# Full live graph and seeded GCP database.
+$env:REFUND_MODE = "live"
+$env:REFUND_DB = "real"
+$env:MYSQL_DATABASE = "final"
+.venv\Scripts\python.exe -m uvicorn refund_app.api:app --port 8077
+```
 
-- `api.py` — FastAPI app: `GET /`, `GET /api/health`, `POST /api/refund`.
-- `simulator.py` — deterministic offline stand-in (`REFUND_AZURE=fake`).
-- `fixtures.py` — canned orders for `REFUND_DB=fake` (incl. an ASI07 leak row).
-- `fake_repo.py` — in-memory repository for `REFUND_DB=fake` (no DB writes).
-- `static/index.html` — single-page UI (vanilla JS, no build step).
+Endpoints:
 
-## Scope note
+- `GET /api/health`
+- `GET /api/cases` — the exact allowlist and canonical selectors
+- `POST /api/refund`
 
-This is the customer **submission** side of the refund flow. The team's
-`idox_dashboard` is the governance **monitoring** side — different surface, no
-overlap. The simulator is a UI/demo stand-in; real reasoning happens only in
-`REFUND_AZURE=real`.
+The preferred request is:
+
+```json
+{"case_id": "demo18"}
+```
+
+Clients may additionally send `order_id`, `customer_id` (or legacy `user_id`),
+and the exact fixture `message`. Every supplied selector must resolve to the
+same canonical case; arbitrary or mixed identities receive HTTP 422.
+
+For compatibility, `REFUND_AZURE=real` selects live mode when `REFUND_MODE` is
+unset. `GCP_MYSQL_*` variables are bridged to the existing `MYSQL_*` names.
+Live mode also requires `REFUND_DB=real`; a non-`final` repository is rejected
+before graph invocation.

@@ -100,7 +100,7 @@ def _triage_to_policy(_state):
         "triage_persistence_result": {
             "handoff_id": "TRIAGE-HANDOFF-001",
             "trace_id": policy_input.case.trace_id,
-            "next_agent": "policy",
+            "next_agent": "policy_agent",
         },
         "requested_order_id": policy_input.order_facts.order_id,
         "order_lookup_result": {
@@ -125,6 +125,47 @@ def _triage_to_response(_state):
         "user_action_required": True,
         "clarification_question": "Could you share your order ID?",
     }
+
+
+def test_human_approval_node_infers_policy_stage_for_persisted_manual_route() -> None:
+    repository = RecordingRepository()
+
+    result = app_graph.HumanApprovalNode(repository)(
+        {
+            "trace_id": "demo13",
+            "policy_decision": {
+                "decision": "manual_review",
+                "reason": "Manager review is required.",
+            },
+            "policy_handoff": "human_review",
+            "policy_persistence_result": {
+                "trace_id": "demo13",
+                "next_agent": "human_approval",
+            },
+            # Regression: the Policy subgraph can omit review_trigger_stage.
+        }
+    )
+
+    assert repository.approvals == [
+        {
+            "trace_id": "demo13",
+            "reason": "manual_review",
+            "stage": "policy",
+            "policy_decision": {
+                "decision": "manual_review",
+                "reason": "Manager review is required.",
+            },
+        }
+    ]
+    assert result["review_trigger_stage"] == "policy"
+    assert result["human_review"]["stage"] == "policy"
+    assert result["workflow_status"] == "waiting_human"
+
+
+def test_human_approval_stage_aliases_normalize_to_repository_vocabulary() -> None:
+    assert app_graph._review_trigger_stage({"review_trigger_stage": "triage-agent"}) == "triage"
+    assert app_graph._review_trigger_stage({"review_trigger_stage": "policy_agent"}) == "policy"
+    assert app_graph._review_trigger_stage({"review_trigger_stage": "Response Governance"}) == "response"
 
 
 def test_app_graph_e2e_policy_refund_response_path(monkeypatch) -> None:
@@ -161,7 +202,7 @@ def test_app_graph_e2e_policy_refund_response_path(monkeypatch) -> None:
     result = graph.invoke({"message": "My item arrived damaged"})
 
     assert result["triage_handoff"] == "policy"
-    assert result["triage_persistence_result"]["next_agent"] == "policy"
+    assert result["triage_persistence_result"]["next_agent"] == "policy_agent"
     assert result["policy_handoff"] == "refund"
     assert result["policy_persistence_result"]["next_agent"] == "refund_agent"
     assert result["refund_result"]["status"] == "success"

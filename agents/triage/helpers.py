@@ -1,19 +1,19 @@
 import re
 
 
-def parse_requested_amount(value, fallback: float) -> float:
+def parse_requested_amount(value) -> float | None:
     if isinstance(value, bool):
-        return fallback
+        return None
     if isinstance(value, (int, float)):
-        return float(value) if value >= 0 else fallback
+        return float(value) if value >= 0 else None
     if isinstance(value, str):
         cleaned = value.replace("$", "").replace(",", "").strip()
         try:
             number = float(cleaned)
         except ValueError:
-            return fallback
-        return number if number >= 0 else fallback
-    return fallback
+            return None
+        return number if number >= 0 else None
+    return None
 
 
 def light_clean(text: str) -> str:

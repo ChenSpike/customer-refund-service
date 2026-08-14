@@ -1,61 +1,74 @@
-"""Canned order rows for offline (REFUND_DB=fake) mode.
+"""Read-only adapters for the canonical ``demo01`` through ``demo20`` fixture.
 
-Shape matches what db.orders.get_order returns, so the same triage node code
-runs unchanged whether the row comes from here or from the live orders table.
+Offline order lookup deliberately exposes only records already declared by
+``database/fixtures/demo_cases.json``.  It never invents a customer, order,
+ticket, or workflow identifier.
 """
+
 from __future__ import annotations
 
-# Keyed by order_id (upper-cased on lookup).
-_ORDERS: dict[str, dict] = {
-    # Clean order — owner's contact matches. Flows through to policy/refund.
-    "ORD-001": {
-        "order_id": "ORD-001",
-        "order_customer_id": "CUST-001",
-        "product_type": "Electronics",
-        "purchase_date": "2025-01-15",
-        "item_status": "damaged",
-        "amount_paid": 299.99,
-        "prior_refund_total": 0.0,
-        "contact_customer_id": "CUST-001",
-        "contact_email": "alice@example.com",
-        "contact_name": "Alice Johnson",
-    },
-    # ASI07 data-leakage row — a foreign customer's contact leaked in (the buggy
-    # JOIN scenario). Triage governance must block this and route to human review.
-    "ORD-LEAK": {
-        "order_id": "ORD-LEAK",
-        "order_customer_id": "CUST-001",
-        "product_type": "Electronics",
-        "purchase_date": "2025-01-15",
-        "item_status": "damaged",
-        "amount_paid": 299.99,
-        "prior_refund_total": 0.0,
-        "contact_customer_id": "CUST-002",       # ← different owner: ownership breach
-        "contact_email": "bob@example.com",
-        "contact_name": "Bob Smith",
-    },
-    # Delivered-and-fine order — policy should deny (no valid refund reason).
-    "ORD-777": {
-        "order_id": "ORD-777",
-        "order_customer_id": "CUST-001",
-        "product_type": "Apparel",
-        "purchase_date": "2025-03-02",
-        "item_status": "delivered",
-        "amount_paid": 59.00,
-        "prior_refund_total": 0.0,
-        "contact_customer_id": "CUST-001",
-        "contact_email": "alice@example.com",
-        "contact_name": "Alice Johnson",
-    },
-}
+from pathlib import Path
+from typing import Any
+
+from demo.catalog import DEFAULT_MANIFEST_PATH, DemoCase, load_demo_catalog
 
 
-def get_order_fixture(order_id: str, buggy: bool = False) -> dict | None:
-    """Drop-in replacement for tools.order_lookup.order_database_lookup."""
-    if not order_id:
+def get_case_fixture(
+    case_id: str,
+    *,
+    manifest_path: str | Path = DEFAULT_MANIFEST_PATH,
+) -> DemoCase:
+    """Return one validated canonical case."""
+
+    return load_demo_catalog(manifest_path).get(case_id)
+
+
+def get_order_fixture(
+    order_id: str,
+    buggy: bool = False,
+    *,
+    manifest_path: str | Path = DEFAULT_MANIFEST_PATH,
+) -> dict[str, Any] | None:
+    """Drop-in offline replacement for ``order_database_lookup``.
+
+    ``buggy=True`` retains a deterministic ASI07 test seam without expanding
+    the root corpus: contact details are borrowed from the following canonical
+    demo customer while the selected order remains unchanged.
+    """
+
+    normalized = str(order_id or "").strip().lower()
+    if not normalized:
         return None
-    return _ORDERS.get(order_id.strip().upper())
+    catalog = load_demo_catalog(manifest_path)
+    case = next(
+        (
+            item
+            for item in catalog.cases
+            if normalized in {item.order_id.lower(), item.selected_order_id.lower()}
+        ),
+        None,
+    )
+    if case is None:
+        return None
+
+    row = case.order_lookup_row()
+    if buggy:
+        index = catalog.cases.index(case)
+        foreign = catalog.cases[(index + 1) % len(catalog.cases)]
+        row.update(
+            {
+                "contact_customer_id": foreign.customer_id,
+                "contact_email": foreign.customer["email"],
+                "contact_name": foreign.customer["full_name"],
+            }
+        )
+    return row
 
 
-def known_order_ids() -> list[str]:
-    return list(_ORDERS.keys())
+def known_order_ids(
+    *,
+    manifest_path: str | Path = DEFAULT_MANIFEST_PATH,
+) -> list[str]:
+    """Return the exact, ordered 20-order allowlist."""
+
+    return [case.order_id for case in load_demo_catalog(manifest_path).cases]

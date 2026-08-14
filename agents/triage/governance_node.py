@@ -14,6 +14,7 @@ contract before writing governance_events through the injected event writer.
 from __future__ import annotations
 
 import json
+import re
 from textwrap import dedent
 from typing import Any
 
@@ -148,7 +149,10 @@ class GovernanceNode(BaseGovernanceNode):
     def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         findings = [checker(state) for checker in self.checkers]
         deterministic_result = build_check_result_payload(self.name, findings)
-        if self.reviewer is None:
+        # Deterministic findings are authoritative and already contain the
+        # local evidence needed to quarantine the case.  Do not send known
+        # prompt injection, PII, schema, or ownership failures to Azure again.
+        if self.reviewer is None or deterministic_result["status"] == "block":
             patch = {
                 "current_stage": "triage_governance",
                 "triage_governance_result": deterministic_result,
@@ -265,12 +269,94 @@ class AzureTriageGovernanceReviewer:
         )
 
 
+_MODEL_IDENTIFIER_PATTERNS = (
+    (
+        re.compile(r"\b(?:order|ord)[-_:][a-z0-9-]*\d[a-z0-9-]*\b", re.IGNORECASE),
+        "[ORDER_REFERENCE]",
+    ),
+    (
+        re.compile(r"\btrace[-_:][a-z0-9-]*\d[a-z0-9-]*\b", re.IGNORECASE),
+        "[TRACE_REFERENCE]",
+    ),
+    (
+        re.compile(r"\b(?:ticket|workflow)[-_:][a-z0-9-]*\d[a-z0-9-]*\b", re.IGNORECASE),
+        "[WORKFLOW_REFERENCE]",
+    ),
+)
+
+
+def _redact_model_identifiers(value: Any) -> str:
+    redacted = str(value or "")
+    for pattern, replacement in _MODEL_IDENTIFIER_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 def _triage_governance_input(state: dict[str, Any]) -> dict[str, Any]:
+    raw_order = dict(state.get("order_lookup_result") or {})
+    requester = str(state.get("user_id") or "").strip()
+    owner = str(raw_order.get("order_customer_id") or "").strip()
+    contact_owner = str(raw_order.get("contact_customer_id") or "").strip()
+
+    # Deterministic checks above retain and inspect the full row locally.  The
+    # Azure reviewer gets only non-PII business facts plus boolean integrity
+    # signals: customer/contact IDs, names, and addresses are never model input,
+    # even when the local check has found a deliberately leaked JOIN row.
+    order_lookup = {
+        field: raw_order[field]
+        for field in (
+            "product_type",
+            "purchase_date",
+            "item_status",
+            "amount_paid",
+            "prior_refund_total",
+        )
+        if field in raw_order
+    }
+    if raw_order:
+        order_lookup.update(
+            {
+                "requester_owns_order": bool(requester and owner and requester == owner),
+                "contact_matches_owner": bool(owner and contact_owner and owner == contact_owner),
+            }
+        )
+
+    raw_triage = state.get("triage_output") or {}
+    raw_case = raw_triage.get("case") or {}
+    raw_request = raw_triage.get("customer_request") or {}
+    raw_facts = raw_triage.get("order_facts") or {}
+    triage_output = {
+        "case": {
+            field: raw_case[field]
+            for field in ("goal", "policy_version")
+            if field in raw_case
+        },
+        "customer_request": {
+            **{
+                field: raw_request[field]
+                for field in ("refund_reason", "requested_amount", "currency")
+                if field in raw_request
+            },
+            "sanitized_text": _redact_model_identifiers(
+                raw_request.get("sanitized_text", "")
+            ),
+        },
+        "order_facts": {
+            field: raw_facts[field]
+            for field in (
+                "product_type",
+                "purchase_date",
+                "item_status",
+                "amount_paid",
+                "prior_refund_total",
+            )
+            if field in raw_facts
+        },
+    }
     return {
-        "user_id": state.get("user_id"),
-        "message": state.get("message", ""),
-        "order_lookup_result": state.get("order_lookup_result") or {},
-        "triage_output": state.get("triage_output") or {},
+        "message": _redact_model_identifiers(state.get("message", "")),
+        "order_lookup_result": order_lookup,
+        "triage_output": triage_output,
     }
 
 
@@ -286,6 +372,10 @@ def _triage_governance_instructions() -> str:
         - pii_risk: customer text or triage output that exposes another person's email, phone number, internal identifier,
           or other third-party personal data.
         - forbidden_tool: triage content that claims unauthorized tool use, direct database access, or hidden system actions.
+
+        Ordinary customer-facing order references and order-number typos are not PII, semantic drift, or forbidden tool
+        use. Workflow and order identifiers have already been replaced with bracketed reference labels; do not flag
+        those labels or infer a security issue merely because a customer says an order number may be wrong.
 
         Return one detailed finding per detected flag. Findings must be ordered exactly like governance.flags. Use
         quarantine when any finding exists and allow otherwise.

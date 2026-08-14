@@ -9,6 +9,7 @@ Everything is kept in memory and thrown away when the process exits.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 
@@ -17,6 +18,7 @@ class FakeRepository:
         self.handoffs: list[dict[str, Any]] = []
         self.results: list[tuple] = []
         self._events: dict[tuple[str, str], Any] = {}
+        self.approvals: dict[str, dict[str, Any]] = {}
 
     # --- PipelineStore surface ------------------------------------------------
     def persist_agent_handoff(self, **kwargs: Any) -> str:
@@ -32,6 +34,24 @@ class FakeRepository:
 
     def record_failure(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+    def persist_refund_result(self, **kwargs: Any) -> tuple[str, str]:
+        self.results.append(("refund", kwargs))
+        return "SIM-REFUND", str(len(self.handoffs) + 1)
+
+    def ensure_human_approval(self, **kwargs: Any) -> str:
+        trace_id = str(kwargs.get("trace_id") or "")
+        approval_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"idox-fake-approval:{trace_id}"))
+        self.approvals.setdefault(
+            trace_id,
+            {
+                "approval_id": approval_id,
+                "trace_id": trace_id,
+                "status": "pending",
+                **kwargs,
+            },
+        )
+        return approval_id
 
     # --- governance event store surface --------------------------------------
     def save_governance_event_record(self, statement: Any) -> str:

@@ -16,7 +16,7 @@ def map_triage_handoff_to_parent_node(state) -> str:
     if handoff is None:
         raise ValueError("triage_persistence_result is required before Triage routing")
     return {
-        "policy": "policy",
+        "policy_agent": "policy",
         "response_agent": "response_agent",
         "human_approval": "human_approval",
     }[handoff]

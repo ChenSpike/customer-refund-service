@@ -72,6 +72,24 @@ class ResponsePersistenceArtifacts:
         }
 
 
+@dataclass(frozen=True)
+class RefundPersistenceArtifacts:
+    transaction_id: str
+    handoff_id: str
+    trace_id: str
+
+    def state_patch(self) -> dict[str, Any]:
+        return {
+            "current_stage": "refund_persistence",
+            "refund_persistence_result": {
+                "transaction_id": self.transaction_id,
+                "handoff_id": self.handoff_id,
+                "trace_id": self.trace_id,
+                "next_agent": "response_agent",
+            },
+        }
+
+
 class PipelineStore:
     """Own the single transactional write for a completed Policy subgraph."""
 
@@ -122,7 +140,7 @@ class PipelineStore:
         if handoff not in {"policy", "response", "human_review"}:
             raise ValueError("triage_handoff must be present before Triage persistence")
         next_agent = {
-            "policy": "policy",
+            "policy": "policy_agent",
             "response": "response_agent",
             "human_review": "human_approval",
         }[handoff]
@@ -171,7 +189,13 @@ class PipelineStore:
             raise ValueError("ticket_id must be present before Response persistence")
         response_result = state.get("response_result") or {}
         workflow_status = str(response_result.get("workflow_status") or state.get("workflow_status") or "completed")
-        current_agent = "completed" if next_agent == "end" else next_agent
+        current_agent = next_agent
+        if next_agent == "end":
+            current_agent = {
+                "waiting_human": "human_approval",
+                "pending_human": "human_approval",
+                "waiting_user": "triage_agent",
+            }.get(workflow_status, "completed")
         handoff_id = self.repository.persist_agent_handoff(
             trace_id=trace_id,
             ticket_id=ticket_id,
@@ -194,6 +218,23 @@ class PipelineStore:
             current_agent=current_agent,
         )
         return ResponsePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
+
+    def persist_refund_state(self, state: dict[str, Any]) -> RefundPersistenceArtifacts:
+        trace_id = str(state.get("trace_id") or "")
+        ticket_id = str(state.get("ticket_id") or "")
+        refund_result = state.get("refund_result") or {}
+        transaction_id, handoff_id = self.repository.persist_refund_result(
+            trace_id=trace_id,
+            ticket_id=ticket_id,
+            policy_decision=state.get("policy_decision") or {},
+            order_lookup_result=state.get("order_lookup_result") or {},
+            refund_result=refund_result,
+        )
+        return RefundPersistenceArtifacts(
+            transaction_id=transaction_id,
+            handoff_id=handoff_id,
+            trace_id=trace_id,
+        )
 
     def persist_policy_artifacts(
         self,
@@ -237,6 +278,14 @@ class ResponsePersistenceNode:
 
     def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
         return self.store.persist_response_state(state).state_patch()
+
+
+class RefundPersistenceNode:
+    def __init__(self, store: PipelineStore) -> None:
+        self.store = store
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self.store.persist_refund_state(state).state_patch()
 
 
 def persist_policy_state(

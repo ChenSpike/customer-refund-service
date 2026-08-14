@@ -6,11 +6,12 @@ from app.mappers.triage_mapper import determine_triage_handoff
 from app.state import AppState
 from db.pipeline_store import PipelineStore, TriagePersistenceNode
 from governance import GovernanceEventWriter
+from tools.azure_client import deployment_for
 
 from agents.policy.azure import AzureJsonClient
 
 from .governance_node import GovernanceNode
-from .node import triage_node
+from .node import TriageNode, triage_node
 
 
 def triage_handoff_node(state: AppState) -> dict:
@@ -26,7 +27,12 @@ def build_triage_agent_graph(
     """Build the triage subgraph using the same AppState-native nodes as the main graph."""
 
     builder = StateGraph(AppState)
-    builder.add_node("triage", triage_node)
+    triage = (
+        TriageNode(responses_client=client.client, model=deployment_for("triage"))
+        if client is not None
+        else triage_node
+    )
+    builder.add_node("triage", triage)
     builder.add_node(
         "triage_governance",
         GovernanceNode(client=client, event_writer=event_writer),

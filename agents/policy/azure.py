@@ -90,7 +90,13 @@ class AzureJsonClient:
         self.deployment = deployment
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.client = AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)
+        self.client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            api_key=api_key,
+            api_version=api_version,
+            timeout=float(os.getenv("AZURE_OPENAI_REQUEST_TIMEOUT_SECONDS", "60")),
+            max_retries=int(os.getenv("AZURE_OPENAI_MAX_RETRIES", "2")),
+        )
 
     @classmethod
     def from_env(cls) -> "AzureJsonClient":
@@ -283,15 +289,6 @@ def _apply_json_repair(
     repair: AzureJsonRepair | AzurePolicyRepair,
 ) -> str:
     document = json.loads(invalid_json)
-    if isinstance(repair, AzurePolicyRepair):
-        correction = repair.confidence_correction
-        decision = document.get("decision")
-        if not isinstance(decision, dict):
-            raise ValueError("policy confidence repair requires an existing decision object")
-        decision["confidence"] = correction.confidence
-        decision["confidence_level"] = correction.confidence_level
-        decision["confidence_evidence"] = correction.confidence_evidence.model_dump(mode="json")
-        decision["precedent_evidence"] = correction.precedent_evidence.model_dump(mode="json")
     seen_paths: set[str] = set()
     for replacement in repair.replacements:
         if replacement.path in seen_paths:
@@ -317,6 +314,18 @@ def _apply_json_repair(
             target[final] = value
         else:
             raise ValueError(f"repair path does not exist: {replacement.path}")
+    if isinstance(repair, AzurePolicyRepair):
+        # This correction is calculated by the deterministic Python validator,
+        # so it must win over any model-proposed replacement that targets the
+        # same fields (or replaces the whole decision object).
+        correction = repair.confidence_correction
+        decision = document.get("decision")
+        if not isinstance(decision, dict):
+            raise ValueError("policy confidence repair requires an existing decision object")
+        decision["confidence"] = correction.confidence
+        decision["confidence_level"] = correction.confidence_level
+        decision["confidence_evidence"] = correction.confidence_evidence.model_dump(mode="json")
+        decision["precedent_evidence"] = correction.precedent_evidence.model_dump(mode="json")
     return json.dumps(document, ensure_ascii=False)
 
 

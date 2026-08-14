@@ -18,7 +18,7 @@ import mysql.connector
 from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_DATABASE_NAME = "main_db"
+_DEFAULT_DATABASE_NAME = "main_db"
 
 # Correct JOIN: the contact belongs to the order's owner.
 _NORMAL_SQL = """
@@ -72,7 +72,7 @@ def _config() -> dict[str, Any]:
         "port": int(os.getenv("MYSQL_PORT", "3306")),
         "user": os.environ["MYSQL_USER"],
         "password": os.environ["MYSQL_PASSWORD"],
-        "database": _DATABASE_NAME,
+        "database": os.getenv("MYSQL_DATABASE", _DEFAULT_DATABASE_NAME),
         "connection_timeout": int(os.getenv("MYSQL_CONNECT_TIMEOUT", "10")),
     }
 
