@@ -35,7 +35,10 @@ POLICY_MIGRATION_002_PATH = REPO_ROOT / "agents" / "policy" / "migrations" / "00
 RunMode = Literal["pending", "all", "trace", "benchmark"]
 BENCHMARK_TRACE_PATTERN = r"^TRACE-POL-(00[1-9]|01[0-9]|020)$"
 DEMO_TRACE_PATTERN = re.compile(r"^demo(?:0[1-9]|1[0-9]|20)$")
-TRANSIENT_MYSQL_ERRORS = frozenset({2003, 2006, 2013})
+# 3024 is MySQL's read-operation timeout.  Cloud SQL can surface it while the
+# connector is still establishing/validating a session, so treat it like the
+# other transient connection failures instead of failing a demo case outright.
+TRANSIENT_MYSQL_ERRORS = frozenset({2003, 2006, 2013, 3024})
 MYSQL_CONNECT_ATTEMPTS = 3
 DEFAULT_CONTINUATION_LEASE_SECONDS = 30
 
