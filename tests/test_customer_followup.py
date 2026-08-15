@@ -18,6 +18,7 @@ from db.followup_store import (
     CustomerFollowupClaim,
     CustomerFollowupConflictError,
     CustomerFollowupStore,
+    CustomerFollowupStoreError,
 )
 from demo.catalog import DEMO_IDS, load_demo_catalog
 from governance import GovernanceStatement
@@ -421,7 +422,7 @@ class _MemoryCursor:
             self.row = {"log_id": found["log_id"]} if found else None
         elif "FROM workflow_runs workflow JOIN tickets" in sql:
             self.row = dict(self.db.workflow)
-        elif sql.startswith("SELECT log_id, payload_json, created_at, TIMESTAMPDIFF"):
+        elif sql.startswith("SELECT audit.log_id, audit.payload_json, audit.created_at, TIMESTAMPDIFF"):
             event = params[1]
             found = self.db.latest_event(event)
             if found:
@@ -499,9 +500,9 @@ class _MemoryCursor:
             # mysql.connector reports affected rows, not matched rows. A
             # repeated same-value update in the same timestamp second is 0.
             self.rowcount = int(changed)
-        elif sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP"):
-            # Lease heartbeat. A same-second refresh may legitimately affect 0
-            # rows, and production code intentionally does not reject that.
+        elif sql.startswith("UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP"):
+            # Lease heartbeat. The mutable workflow timestamp carries lease
+            # activity; the original audit timestamp remains chronological.
             claim = self.db.latest_event("customer_followup_claimed")
             if claim is not None:
                 self.db.claim_ages[claim["log_id"]] = 0
@@ -645,10 +646,12 @@ def test_store_heartbeat_resets_claim_age_and_stops_at_terminal_workflow() -> No
     database, store = _store_fixture()
     claim = store.claim(database.case)
     claim_row = database.latest_event("customer_followup_claimed")
+    claim_created_at = claim_row["created_at"]
     database.claim_ages[claim_row["log_id"]] = 29
 
     assert store.heartbeat(database.case, claim.claim_token) is True
     assert database.claim_ages[claim_row["log_id"]] == 0
+    assert claim_row["created_at"] == claim_created_at
 
     database.workflow.update(status="completed", current_agent="completed")
     assert store.heartbeat(database.case, claim.claim_token) is False
@@ -799,6 +802,13 @@ def test_completed_without_marker_is_recovered_graph_free_then_replays() -> None
     assert recovered.completed_result["matched_expectations"] is True
     assert recovered.completed_result["final_outcome"] == "refund_issued"
     assert recovered.completed_result["follow_up"]["recovered_without_graph"] is True
+    assert set(recovered.completed_result["persistence"]["required_routes"]) == {
+        "customer->triage_agent",
+        "triage_agent->policy_agent",
+        "policy_agent->refund_agent",
+        "refund_agent->response_agent",
+        "response_agent->end",
+    }
     assert database.latest_event("customer_followup_completed")
 
     replay = store.claim(database.case)
@@ -837,12 +847,39 @@ def test_complete_proves_roots_history_route_refund_and_response_semantics() -> 
     assert result["persistence"]["history"]["continuation_handoff_count"] == 4
     assert result["persistence"]["history"]["continuation_audit_count"] == 4
     assert result["persistence"]["history"]["continuation_governance_count"] == 2
+    assert set(result["persistence"]["required_routes"]) == {
+        "customer->triage_agent",
+        "triage_agent->policy_agent",
+        "policy_agent->refund_agent",
+        "refund_agent->response_agent",
+        "response_agent->end",
+    }
     assert {row["handoff_id"] for row in database.tables["agent_handoffs"]} == {
         "triage-0", "policy-0", "response-0", "triage-1", "policy-1",
         "refund-1", "response-1",
         str(uuid.uuid5(uuid.NAMESPACE_URL, "idox-handoff:demo10:customer_followup")),
     }
     assert result["persistence"]["response_content_checks"]["decision_reflected"] is True
+
+
+def test_complete_rejects_an_extra_customer_receipt_handoff() -> None:
+    database, store = _store_fixture()
+    claim = store.claim(database.case)
+    database.install_completed_attempt()
+    database.tables["agent_handoffs"].append(
+        database._handoff(
+            "unexpected-customer-handoff",
+            "customer",
+            "triage_agent",
+            {"message": "duplicate receipt"},
+        )
+    )
+
+    with pytest.raises(
+        CustomerFollowupStoreError,
+        match="customer receipt handoff is not unique and exact",
+    ):
+        store.complete(database.case, {"matched_expectations": True}, claim.claim_token)
 
 
 def test_stale_token_cannot_fail_or_complete_newer_attempt() -> None:
@@ -895,7 +932,7 @@ def test_repository_appends_marked_stage_and_governance_rows_and_fences_stale_to
     stage_audit = database.latest_event("triage_agent_evaluated")
     assert json.loads(stage_audit["payload_json"])["_continuation"] == expected_marker
     assert sum(
-        sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP")
+        sql.startswith("UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP")
         for sql, _ in database.statements[statement_index:]
     ) == 1
 
@@ -941,7 +978,7 @@ def test_repository_appends_marked_stage_and_governance_rows_and_fences_stale_to
         "claim_token": newer_token,
     }
     assert sum(
-        sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP")
+        sql.startswith("UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP")
         for sql, _ in database.statements[statement_index:]
     ) == 2
 

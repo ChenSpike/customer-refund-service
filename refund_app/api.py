@@ -175,7 +175,9 @@ def _check_live_database() -> dict[str, Any]:
                  WHERE followup_completed.trace_id = workflow.trace_id
                    AND followup_completed.event_type = 'customer_followup_completed') AS followup_completed,
               (SELECT TIMESTAMPDIFF(
-                    SECOND, MAX(followup_claimed.created_at), CURRENT_TIMESTAMP
+                    SECOND,
+                    GREATEST(MAX(followup_claimed.created_at), workflow.updated_at),
+                    CURRENT_TIMESTAMP
                  ) FROM audit_log followup_claimed
                  WHERE followup_claimed.trace_id = workflow.trace_id
                    AND followup_claimed.event_type = 'customer_followup_claimed') AS followup_claim_age_seconds

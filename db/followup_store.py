@@ -299,10 +299,9 @@ class CustomerFollowupStore:
                 connection.commit()
                 return False
             cursor.execute(
-                "UPDATE audit_log SET created_at = CURRENT_TIMESTAMP "
-                "WHERE trace_id = %s AND event_type = %s "
-                "ORDER BY log_id DESC LIMIT 1",
-                (case.trace_id, _CLAIMED),
+                "UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP "
+                "WHERE trace_id = %s AND status = 'running'",
+                (case.trace_id,),
             )
             connection.commit()
             return True
@@ -627,12 +626,18 @@ class CustomerFollowupStore:
             (case.trace_id,),
         )
         handoffs = list(cursor.fetchall())
-        if not any(
-            row["from_agent"] == "customer" and row["to_agent"] == "triage_agent"
+        customer_handoffs = [
+            row
             for row in handoffs
+            if row["from_agent"] == "customer" and row["to_agent"] == "triage_agent"
+        ]
+        if (
+            len(customer_handoffs) != 1
+            or str(customer_handoffs[0]["handoff_id"])
+            != str(receipt_payload.get("handoff_id") or "")
         ):
             raise CustomerFollowupStoreError(
-                f"{case.trace_id}: persisted customer receipt handoff is missing"
+                f"{case.trace_id}: persisted customer receipt handoff is not unique and exact"
             )
         continuation_handoffs = [
             row
@@ -755,7 +760,9 @@ class CustomerFollowupStore:
             },
             "required_routes": sorted(
                 f"{source}->{target}"
-                for source, target in required_continuation_routes
+                for source, target in (
+                    required_continuation_routes | {("customer", "triage_agent")}
+                )
             ),
             "refund": {
                 "status": refund["status"],
@@ -904,10 +911,13 @@ class CustomerFollowupStore:
     @staticmethod
     def _latest_audit(cursor: Any, trace_id: str, event_type: str) -> dict[str, Any] | None:
         cursor.execute(
-            "SELECT log_id, payload_json, created_at, "
-            "TIMESTAMPDIFF(SECOND, created_at, CURRENT_TIMESTAMP) AS age_seconds "
-            "FROM audit_log WHERE trace_id = %s AND event_type = %s "
-            "ORDER BY log_id DESC LIMIT 1 FOR UPDATE",
+            "SELECT audit.log_id, audit.payload_json, audit.created_at, "
+            "TIMESTAMPDIFF(SECOND, GREATEST(audit.created_at, workflow.updated_at), "
+            "CURRENT_TIMESTAMP) AS age_seconds "
+            "FROM audit_log audit JOIN workflow_runs workflow "
+            "ON workflow.trace_id = audit.trace_id "
+            "WHERE audit.trace_id = %s AND audit.event_type = %s "
+            "ORDER BY audit.log_id DESC LIMIT 1 FOR UPDATE",
             (trace_id, event_type),
         )
         return cursor.fetchone()

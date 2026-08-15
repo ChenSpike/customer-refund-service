@@ -2235,14 +2235,12 @@ def _require_active_followup_claim(
 	if cursor.fetchone() is not None:
 		raise CloudDatabaseError(f"{trace_id}: customer follow-up is already completed")
 	# Each fenced persistence transaction proves that the original worker is
-	# still making progress.  Refresh the leased claim in the same transaction
-	# so a graph whose total Azure latency exceeds the lease is not reclaimed
-	# between otherwise healthy stages.  A same-second no-op is valid: the
-	# selected row is locked and its age is already zero.
+	# still making progress. Refresh the workflow's mutable activity timestamp;
+	# the claim audit timestamp remains immutable so dashboard chronology stays
+	# truthful. A same-second no-op is valid because the workflow row is locked.
 	cursor.execute(
-		"UPDATE audit_log SET created_at = CURRENT_TIMESTAMP "
-		"WHERE trace_id = %s AND event_type = 'customer_followup_claimed' "
-		"ORDER BY log_id DESC LIMIT 1",
+		"UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP "
+		"WHERE trace_id = %s AND status = 'running'",
 		(trace_id,),
 	)
 
