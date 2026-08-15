@@ -1,0 +1,32 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  margin: 0;
+  background: #ffffff;
+  font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+::selection {
+  background: oklch(0.55 0.13 250 / 0.25);
+}
+
+button {
+  font-family: inherit;
+}
+
+a {
+  color: oklch(0.5 0.13 250);
+}
+
+a:hover {
+  color: oklch(0.4 0.13 250);
+}

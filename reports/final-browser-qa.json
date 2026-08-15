@@ -1,0 +1,203 @@
+{
+  "schema_version": "1.0",
+  "status": "passed",
+  "completed_at_utc": "2026-08-15T04:05:32Z",
+  "source": {
+    "branch": "final",
+    "commit": "b78225d7cf9fa8f4e24e0c7a234111db20c79570",
+    "tracked_tree_dirty_before_evidence": false,
+    "http_acceptance_report_sha256": "37ca4eb5b6cec6515eb9e6d540d45caed4ed847c268316f47728f2e5204481a3"
+  },
+  "environment": {
+    "refund_ui_url": "http://127.0.0.1:8077/",
+    "dashboard_url": "http://127.0.0.1:3000/?trace=demo07",
+    "refund_mode": "live",
+    "refund_database_adapter": "real",
+    "database": "final",
+    "canonical_root_fingerprint": "9df31897eb27ffb8b1e31d55500ec3a0fe246dfcaa4ae46b22679950176a1039"
+  },
+  "refund_ui": {
+    "catalog_exact_ordered_ids": [
+      "demo01",
+      "demo02",
+      "demo03",
+      "demo04",
+      "demo05",
+      "demo06",
+      "demo07",
+      "demo08",
+      "demo09",
+      "demo10",
+      "demo11",
+      "demo12",
+      "demo13",
+      "demo14",
+      "demo15",
+      "demo16",
+      "demo17",
+      "demo18",
+      "demo19",
+      "demo20"
+    ],
+    "selected_case": "demo10",
+    "persisted_followup_control": "Replay exact follow-up",
+    "replay_visible_result": {
+      "route": "refund_agent",
+      "outcome": "refund_issued",
+      "workflow_status": "completed",
+      "matched_expectations": true
+    },
+    "console_warnings_or_errors": []
+  },
+  "dashboard_ui": {
+    "trace_id": "demo07",
+    "before": {
+      "status": "manual_review",
+      "workflow_status": "pending_human",
+      "pending_approval_count": 10,
+      "approval_id": "POL-APP-e87ea768f5985cb9a1cc344cfd90",
+      "requested_amount": 299.99,
+      "amount_paid": 299.99,
+      "prior_refund_total": 100.0,
+      "remaining_refundable": 199.99,
+      "currency": "USD"
+    },
+    "browser_action": {
+      "decision": "partial_refund",
+      "resolved_amount": 199.99,
+      "reviewer": "redacted",
+      "notes": "redacted",
+      "native_confirmation_accepted": true
+    },
+    "after": {
+      "status": "human_approved",
+      "workflow_status": "completed",
+      "pending_approval_count": 9,
+      "pending_approval_id": null,
+      "approval_status": "approved",
+      "refund_status": "issued",
+      "refund_amount": 199.99,
+      "is_partial_refund": true,
+      "initial_waiting_response_visible_in_timeline": true,
+      "continued_final_response_visible_in_timeline": true
+    },
+    "console_warnings_or_errors": []
+  },
+  "approval_replay": {
+    "transport": "dashboard_http_api",
+    "http_status": 200,
+    "idempotent": true,
+    "continuation_status": "already_completed",
+    "workflow_status": "completed",
+    "refund_id": "RF-ticket-demo07",
+    "refund_amount": 199.99,
+    "response_final_outcome": "partial_refund",
+    "side_effect_counts_unchanged": true
+  },
+  "database_after_browser_approval": {
+    "root_counts": {
+      "customers": 20,
+      "orders": 20,
+      "tickets": 20,
+      "workflow_runs": 20
+    },
+    "runtime_output_counts": {
+      "agent_handoffs": 75,
+      "audit_log": 81,
+      "governance_events": 45,
+      "policy_review_events": 8,
+      "human_approvals": 10,
+      "refund_transactions": 7
+    },
+    "all_orphan_checks_zero": true,
+    "pending_approval_traces": [
+      "demo08",
+      "demo09",
+      "demo11",
+      "demo12",
+      "demo13",
+      "demo15",
+      "demo18",
+      "demo19",
+      "demo20"
+    ]
+  },
+  "demo07_append_only_history": {
+    "initial_rows_preserved": true,
+    "counts": {
+      "handoffs_before": 3,
+      "handoffs_after": 6,
+      "audits_before": 3,
+      "audits_after": 8,
+      "governance_before": 2,
+      "governance_after": 3
+    },
+    "initial_handoffs_unchanged": [
+      {
+        "handoff_id": "5827a182-09a6-541b-82ce-b8e9dedcdc00",
+        "input_sha256": "985f432acaa0d932f7f6aa92b643af124c266f6a5ff0373448841637e0f78c44",
+        "output_sha256": "3def25b9f0d21ec2acff0b7afe431beee1c82029a4887f20cc502a879be38987"
+      },
+      {
+        "handoff_id": "fbbbb3a9-05e9-5ee6-bb6d-8f1927db6249",
+        "input_sha256": "f0b9bfb3e188d6228416f9f8e2772830bfb9ea5816df9987c80f87af361541b7",
+        "output_sha256": "32be6b2f8de636f5769c1f058b7a6e53e5db6255221993aa6886de6a88d21888"
+      },
+      {
+        "handoff_id": "ea673138-bd61-5400-9aab-c98c778270eb",
+        "input_sha256": "14fe4d189b5d7b96c0eeb060b43eeb02478dce58bdb503b60dc781f95ed999fd",
+        "output_sha256": "802275b20d184c876e489d4d1a596c7d586e8db5218537bd1c3c97d8e2812235"
+      }
+    ],
+    "initial_audits_unchanged": [
+      {
+        "log_id": 820,
+        "event_type": "triage_agent_evaluated",
+        "payload_sha256": "e962121534c1fb90094f93908b7c0e042fc214863660cb095622ed087c84e779"
+      },
+      {
+        "log_id": 821,
+        "event_type": "policy_agent_evaluated",
+        "payload_sha256": "94631d08e9408e811cd6239bf9b9f957708637f9f7d5b3e07fc69ec4ebd63c01"
+      },
+      {
+        "log_id": 822,
+        "event_type": "response_agent_evaluated",
+        "payload_sha256": "e546767f8e3892bc2ee0676a84eabc7dbaf9867c2c16460759e07f09caa03338"
+      }
+    ],
+    "initial_governance_event_ids_preserved": [
+      "GOV-STM-512c7017902b51c9a18097d9f127",
+      "GOV-STM-e3f9441db7f452b8a02b69d6fccb"
+    ],
+    "continued_response": {
+      "handoff_id": "774101ef-2a4a-51e6-911f-6cd354a8b1d4",
+      "distinct_from_initial_response": true,
+      "continuation_type": "human_approval",
+      "approval_id": "POL-APP-e87ea768f5985cb9a1cc344cfd90",
+      "attempt": 1,
+      "sequence": 876
+    }
+  },
+  "screenshots": [
+    {
+      "file": "reports/final-refund-ui.jpg",
+      "mime_type": "image/jpeg",
+      "bytes": 62398,
+      "sha256": "32b3b8fbb60af7ff99d7a542c015afbb87c91d964bf5a72416ed9481b3973df8",
+      "inspected": true
+    },
+    {
+      "file": "reports/final-dashboard-demo07.jpg",
+      "mime_type": "image/jpeg",
+      "bytes": 57906,
+      "sha256": "6aa08e554b6545eaf3b5979a5461266bacf6429334ea93afdd6cb482fe18f908",
+      "inspected": true
+    }
+  ],
+  "boundaries": {
+    "refund_executor": "deterministic local payment adapter; no external funds moved",
+    "reviewer_authentication": "loopback demo uses self-asserted reviewer identity",
+    "remaining_pending_approvals": "nine cases intentionally remain pending for the review queue demonstration"
+  }
+}
