@@ -97,9 +97,9 @@ export default function Metrics() {
         </div>
 
         <div style={card}>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>Governance Holds by OWASP Category</div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Persisted Blocks by OWASP Category</div>
           <div style={{ fontSize: 11.5, color: colors.textMuted, marginTop: 2, marginBottom: 8 }}>
-            Blocked or quarantined interceptor events, by risk category
+            Historical persisted block or quarantine events, by risk category
           </div>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={owaspData} margin={{ top: 16, right: 8, left: -12, bottom: 0 }}>

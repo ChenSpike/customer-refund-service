@@ -563,7 +563,7 @@ class HttpAcceptanceHarness:
             "id": case.ticket_id,
             "workflowStatus": "completed",
             "currentAgent": "completed",
-            "status": "auto_approved",
+            "status": "followup_approved",
             "finalOutcome": "approved",
         }
         for field, wanted in exact.items():
@@ -891,7 +891,8 @@ class HttpAcceptanceHarness:
             "Metrics audit event count differs",
         )
         _require(
-            secondary.get("Governance Checks") == str(sum(expected_governance_counts.values())),
+            secondary.get("Persisted Governance Events")
+            == str(sum(expected_governance_counts.values())),
             "Metrics governance event count differs",
         )
         return {
@@ -979,7 +980,7 @@ class HttpAcceptanceHarness:
         for case in self.catalog.cases:
             summary = _mapping(by_trace[case.trace_id], f"{case.trace_id} post-follow-up summary")
             if case.trace_id in followup_ids:
-                wanted_status = "auto_approved"
+                wanted_status = "followup_approved"
                 wanted_workflow = "completed"
             else:
                 wanted_status = _expected_dashboard_status(case)
@@ -1072,7 +1073,7 @@ class HttpAcceptanceHarness:
             "Post-follow-up audit metric differs",
         )
         _require(
-            secondary.get("Governance Checks") == str(len(governance_rows)),
+            secondary.get("Persisted Governance Events") == str(len(governance_rows)),
             "Post-follow-up governance metric differs",
         )
         return {

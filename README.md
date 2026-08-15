@@ -127,6 +127,19 @@ Useful dashboard endpoints:
 - `GET /api/approvals/pending`
 - `POST /api/approvals/{trace_id}/resolve`
 
+The dashboard keeps the demo stages distinct. A refund completed from the
+initial request is **Auto-Approved**; a refund completed only after the customer
+answers a request for information is **Follow-up Approved** and retains the
+original Needs Info response in the case detail. On a clean initial run,
+`demo10` and `demo14` therefore remain **Needs Info** until their explicit
+follow-up endpoints are called. Dashboard timestamps are normalized from the
+database's UTC `TIMESTAMP` values before relative labels are calculated.
+
+The Governance page is a history of persisted interceptor events, including
+allow events. Policy Agent allow decisions do not create a governance-event row
+when there is no finding; those decisions remain available in the Policy
+handoff and case detail instead.
+
 Resolve a pending review only with the `approval_id` returned by `GET /api/approvals/pending`:
 
 ```powershell
@@ -145,7 +158,20 @@ Invoke-RestMethod `
     -Body $body
 ```
 
-Allowed decisions are `approve`, `partial_refund`, and `deny`. A refund continuation requires a positive `resolved_amount` with at most two decimal places and cannot exceed the remaining refundable amount; `partial_refund` must also be below the requested amount. A non-refund approval and every denial must omit the amount. `reviewer` and `notes` are required. Replaying the exact resolution is idempotent, while a conflicting resolution returns HTTP 409. A successful request records the reviewer decision transactionally, then resumes the appropriate Policy, Refund, or Response path and records continuation completion. If downstream continuation fails, the API returns HTTP 502 and the identical decision can be retried. A later governance block can create one new pending approval without recursion.
+Allowed decisions are `approve`, `partial_refund`, and `deny`. A refund
+continuation requires a positive `resolved_amount` with at most two decimal
+places and cannot exceed the remaining refundable amount. Full `approve` must
+equal the persisted requested amount (or the full remaining balance when no
+request amount was recorded). When the request exceeds the refundable balance,
+full approval is unavailable and `partial_refund` is required; a partial amount
+must remain below the full requested target. A non-refund approval and every
+denial must omit the amount. `reviewer` and `notes` are required. Replaying the
+exact durable resolution is idempotent, while a conflicting resolution returns
+HTTP 409. A successful request records the reviewer decision transactionally,
+then resumes the appropriate Policy, Refund, or Response path and records
+continuation completion. If downstream continuation fails, the API returns HTTP
+502 and the identical decision can be retried. A later governance block can
+create one new pending approval without recursion.
 
 ### Refund case selector
 

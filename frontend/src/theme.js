@@ -26,11 +26,13 @@ export const colors = {
 
 export const STATUS_META = {
   auto_approved: { label: 'Auto-Approved', color: colors.goodText, bg: 'oklch(0.55 0.14 150 / 0.14)' },
+  followup_approved: { label: 'Follow-up Approved', color: 'oklch(0.38 0.12 220)', bg: 'oklch(0.55 0.12 220 / 0.13)' },
   human_approved: { label: 'Human-Approved', color: 'oklch(0.38 0.12 190)', bg: 'oklch(0.52 0.12 190 / 0.14)' },
   pending_review: { label: 'Pending Review', color: 'oklch(0.35 0.02 260)', bg: 'oklch(0.9 0.008 90)' },
   manual_review: { label: 'Manual Review', color: colors.warnText, bg: colors.card, border: 'oklch(0.55 0.15 80 / 0.45)' },
   needs_info: { label: 'Needs Info', color: colors.accentText, bg: 'oklch(0.5 0.13 250 / 0.1)' },
   quarantined: { label: 'Quarantined', color: colors.navyText, bg: colors.navy },
+  execution_failed: { label: 'Execution Failed', color: colors.warnText, bg: 'oklch(0.55 0.15 80 / 0.14)', border: 'oklch(0.55 0.15 80 / 0.45)' },
   rejected: { label: 'Rejected', color: colors.dangerText, bg: 'oklch(0.5 0.19 25 / 0.1)' },
 };
 
@@ -38,11 +40,13 @@ export const STATUS_META = {
 // STATUS_META, just a solid hue instead of a text/badge-background pairing.
 export const STATUS_CHART_COLOR = {
   auto_approved: colors.good,
+  followup_approved: 'oklch(0.55 0.12 220)',
   human_approved: 'oklch(0.52 0.12 190)',
   pending_review: 'oklch(0.65 0.01 90)',
   manual_review: colors.warn,
   needs_info: colors.accent,
   quarantined: colors.navy,
+  execution_failed: colors.warn,
   rejected: colors.danger,
 };
 
@@ -59,6 +63,13 @@ export function money(n) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+}
+
+export function requestedMoney(n, currency = '') {
+  if (n === null || n === undefined || n === '') return 'Not provided';
+  const num = Number(n);
+  if (!Number.isFinite(num)) return 'Not provided';
+  return `${currency ? `${currency} ` : ''}$${money(num)}`;
 }
 
 export function navButtonStyle(active) {

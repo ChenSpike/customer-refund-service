@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { getPendingApprovals } from '../api';
 import ApprovalResolutionForm from '../components/ApprovalResolutionForm';
-import { card, colors, money, pageWrap } from '../theme';
+import ApprovalTriggerEvidence from '../components/ApprovalTriggerEvidence';
+import { card, colors, money, pageWrap, requestedMoney } from '../theme';
 
 export default function PendingApprovals({ onSelectCase, onChanged }) {
   const [approvals, setApprovals] = useState([]);
@@ -68,7 +69,7 @@ export default function PendingApprovals({ onSelectCase, onChanged }) {
             </div>
 
             <div style={{ marginTop: 15, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <Field label="Requested" value={`${approval.currency || 'USD'} $${money(approval.requested_amount)}`} mono />
+              <Field label="Requested" value={requestedMoney(approval.requested_amount, approval.currency || 'USD')} mono />
               <Field label="Remaining" value={`${approval.currency || 'USD'} $${money(approval.remaining_refundable)}`} mono />
               <Field label="Trigger" value={approval.trigger?.type || approval.triggering_event_type} />
               <Field label="Approve route" value={approval.approved_next_agent || '-'} mono />
@@ -78,6 +79,7 @@ export default function PendingApprovals({ onSelectCase, onChanged }) {
                 {approval.reason}
               </div>
             )}
+            <ApprovalTriggerEvidence approval={approval} />
 
             <button onClick={() => onSelectCase(approval.trace_id)} style={{ ...secondaryButtonStyle, marginTop: 14, width: '100%' }}>
               Open full case

@@ -12,6 +12,7 @@ from dashboard_app.approval import (
     ApprovalContinuationFailed,
     ApprovalNotFound,
     ApprovalServiceUnavailable,
+    ApprovalValidationError,
 )
 
 
@@ -82,6 +83,34 @@ def test_resolve_approval_requires_explicit_reviewer_and_delegates_once(
     ]
 
 
+def test_resolve_approval_returns_legacy_exact_replay_as_idempotent(
+    approval_client: tuple[TestClient, FakeApprovalService],
+) -> None:
+    client, fake = approval_client
+
+    class LegacyReplayService(FakeApprovalService):
+        def resolve(self, trace_id: str, **kwargs: Any) -> dict[str, Any]:
+            result = super().resolve(trace_id, **kwargs)
+            return {**result, "idempotent": True, "continuation_status": "already_completed"}
+
+    legacy = LegacyReplayService()
+    app.dependency_overrides[get_approval_resolution_service] = lambda: legacy
+    request = {
+        **VALID_REQUEST,
+        "approval_id": "approval-demo07",
+        "resolved_amount": 199.99,
+        "notes": "Approve the remaining refundable balance.",
+    }
+
+    response = client.post("/api/approvals/demo07/resolve", json=request)
+
+    assert response.status_code == 200
+    assert response.json()["idempotent"] is True
+    assert response.json()["continuation_status"] == "already_completed"
+    assert legacy.calls[0]["resolved_amount"] == Decimal("199.99")
+    assert fake.calls == []
+
+
 @pytest.mark.parametrize("trace_id", ["demo00", "demo21", "demo1", "demo01-extra"])
 def test_resolve_approval_rejects_traces_outside_the_exact_demo_set(
     approval_client: tuple[TestClient, FakeApprovalService],
@@ -103,6 +132,8 @@ def test_resolve_approval_rejects_traces_outside_the_exact_demo_set(
         {"decision": "partial_refund", "resolved_amount": None},
         {"decision": "partial_refund", "resolved_amount": 1.001},
         {"resolved_amount": "79.99"},
+        {"resolved_amount": 1e28},
+        {"resolved_amount": 1e100},
         {"reviewer": "   "},
         {"notes": "   "},
         {"unexpected": "field"},
@@ -141,6 +172,11 @@ def test_resolve_approval_requires_reviewer_field(
         (ApprovalConflict("demo01: approval was already resolved"), 409, "already resolved"),
         (ApprovalServiceUnavailable("database offline"), 503, "service is unavailable"),
         (ApprovalContinuationFailed("response failed"), 502, "continuation failed"),
+        (
+            ApprovalValidationError("full approval is unavailable; use partial_refund"),
+            422,
+            "partial_refund",
+        ),
     ],
 )
 def test_resolve_approval_maps_domain_failures(

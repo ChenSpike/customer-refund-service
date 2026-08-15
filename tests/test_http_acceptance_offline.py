@@ -31,6 +31,7 @@ class MockFinalSystem:
         ready_for_full_run: bool = True,
         reverse_catalog: bool = False,
         false_match: str | None = None,
+        followup_dashboard_status: str = "followup_approved",
     ) -> None:
         self.catalog = load_demo_catalog()
         self.refund_mode = refund_mode
@@ -38,6 +39,7 @@ class MockFinalSystem:
         self.ready_for_full_run = ready_for_full_run
         self.reverse_catalog = reverse_catalog
         self.false_match = false_match
+        self.followup_dashboard_status = followup_dashboard_status
         self.executed: set[str] = set()
         self.followup_completed: set[str] = set()
         self.calls: list[tuple[str, str, str]] = []
@@ -425,7 +427,7 @@ class MockFinalSystem:
             assert case.follow_up is not None
             workflow_status = "completed"
             current_agent = "completed"
-            status = "auto_approved"
+            status = self.followup_dashboard_status
             final_outcome = "approved"
             approvals = []
             pending_id = None
@@ -508,7 +510,7 @@ class MockFinalSystem:
             "secondaryStats": [
                 {"label": "Total Cases", "value": "20"},
                 {"label": "Pending Approvals", "value": str(len(self._pending()))},
-                {"label": "Governance Checks", "value": str(governance_total)},
+                {"label": "Persisted Governance Events", "value": str(governance_total)},
                 {"label": "Audit Events", "value": str(audit_total)},
             ],
             "statusBreakdown": [
@@ -607,6 +609,33 @@ def test_offline_mock_transport_proves_all_twenty_http_contracts(tmp_path: Path)
     }
     assert [entry["case_id"] for entry in report["cases"]] == list(DEMO_IDS)
     assert system.executed == set(DEMO_IDS)
+    initial_statuses = {
+        entry["case_id"]: entry["dashboard"]["body"]["status"]
+        for entry in report["cases"]
+    }
+    assert initial_statuses["demo01"] == "auto_approved"
+    assert initial_statuses["demo10"] == "needs_info"
+    assert initial_statuses["demo14"] == "needs_info"
+    followup_statuses = {
+        entry["case_id"]: entry["dashboard_after"]["body"]["status"]
+        for entry in report["followups"]
+    }
+    assert followup_statuses == {
+        "demo10": "followup_approved",
+        "demo14": "followup_approved",
+    }
+    post_followup_statuses = {
+        row["traceId"]: row["status"]
+        for row in report["post_followup"]["cases"]["body"]
+    }
+    assert post_followup_statuses["demo10"] == "followup_approved"
+    assert post_followup_statuses["demo14"] == "followup_approved"
+    metric_labels = {
+        row["label"]
+        for row in report["post_followup"]["metrics"]["body"]["secondaryStats"]
+    }
+    assert "Persisted Governance Events" in metric_labels
+    assert "Governance Checks" not in metric_labels
     persisted = json.loads(output.read_text(encoding="utf-8"))
     assert persisted["status"] == "passed"
     assert persisted["source"]["fixture_sha256"] == report["source"]["fixture_sha256"]
@@ -615,6 +644,21 @@ def test_offline_mock_transport_proves_all_twenty_http_contracts(tmp_path: Path)
         "/api/refund/demo10/follow-up": 2,
         "/api/refund/demo14/follow-up": 2,
     }
+
+
+def test_offline_mock_transport_rejects_legacy_followup_status(tmp_path: Path) -> None:
+    system = MockFinalSystem(followup_dashboard_status="auto_approved")
+    refund, dashboard = _clients(system)
+
+    with pytest.raises(
+        HttpAcceptanceError,
+        match="demo10 post-follow-up dashboard: status differs",
+    ):
+        run_http_acceptance(
+            _config(tmp_path / "stale-followup-status.json"),
+            refund_client=refund,
+            dashboard_client=dashboard,
+        )
 
 
 def test_offline_mock_transport_rejects_offline_refund_health(tmp_path: Path) -> None:

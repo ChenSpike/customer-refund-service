@@ -1402,6 +1402,152 @@ def test_repository_locks_and_atomically_resolves_pending_approval() -> None:
     assert result.idempotent is False
 
 
+@pytest.mark.parametrize("resolved_amount", [Decimal("199.99"), Decimal("299.99")])
+def test_repository_requires_partial_refund_when_request_exceeds_remaining_balance(
+    resolved_amount: Decimal,
+) -> None:
+    store = DatabaseStore()
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    with pytest.raises(ValueError, match="full approval is unavailable.*use partial_refund"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision="approve",
+            resolved_amount=resolved_amount,
+            reviewer="manager@example.com",
+            notes="Approve the full request.",
+        )
+
+    assert connections[0].started and connections[0].rolled_back
+    assert not connections[0].committed
+    assert store.approval["status"] == "pending"
+    assert store.approval_handoffs == []
+    assert store.audit == []
+
+
+def test_repository_exactly_replays_legacy_full_approval_before_new_amount_rules() -> None:
+    store = DatabaseStore()
+    store.approval.update(
+        {
+            "status": "approved",
+            "decision": "approve",
+            "resolved_amount": Decimal("199.99"),
+            "reviewer": "manager@example.com",
+            "notes": "Approve the remaining refundable balance.",
+            "workflow_status": "completed",
+            "current_agent": "completed",
+        }
+    )
+    store.workflow.update({"status": "completed", "current_agent": "completed"})
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    replay = repository.resolve_human_approval(
+        trace_id="demo07",
+        decision="approve",
+        resolved_amount=Decimal("199.99"),
+        reviewer="manager@example.com",
+        notes="Approve the remaining refundable balance.",
+    )
+
+    assert replay.idempotent is True
+    assert replay.resolved_amount == 199.99
+    assert connections[0].committed and not connections[0].rolled_back
+    assert store.approval_handoffs == []
+    assert [row["event_type"] for row in store.audit] == [
+        "human_approval_continuation_claimed"
+    ]
+
+    with pytest.raises(HumanApprovalConflictError, match="different decision"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision="partial_refund",
+            resolved_amount=Decimal("199.99"),
+            reviewer="manager@example.com",
+            notes="Approve the remaining refundable balance.",
+        )
+
+
+def test_repository_full_approve_requires_exact_requested_amount() -> None:
+    store = DatabaseStore()
+    store.approval["amount_requested"] = Decimal("199.99")
+    store.approval["requested_amount"] = Decimal("199.99")
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    with pytest.raises(ValueError, match="must equal the full requested amount 199.99"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision="approve",
+            resolved_amount=Decimal("150.00"),
+            reviewer="manager@example.com",
+            notes="Approve less than the full request.",
+        )
+
+    result = repository.resolve_human_approval(
+        trace_id="demo07",
+        decision="approve",
+        resolved_amount=Decimal("199.99"),
+        reviewer="manager@example.com",
+        notes="Approve the exact full request.",
+    )
+
+    assert result.resolved_amount == 199.99
+    assert store.approval["decision"] == "approve"
+
+
+def test_repository_full_approve_uses_remaining_balance_when_request_is_missing() -> None:
+    store = DatabaseStore()
+    store.approval["amount_requested"] = None
+    store.approval["requested_amount"] = None
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    with pytest.raises(ValueError, match="must equal the full remaining refundable amount 199.99"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision="approve",
+            resolved_amount=Decimal("199.98"),
+            reviewer="manager@example.com",
+            notes="Approve less than the full remaining balance.",
+        )
+
+    result = repository.resolve_human_approval(
+        trace_id="demo07",
+        decision="approve",
+        resolved_amount=Decimal("199.99"),
+        reviewer="manager@example.com",
+        notes="Approve the exact remaining balance.",
+    )
+
+    assert result.resolved_amount == 199.99
+    assert store.approval["decision"] == "approve"
+
+
+@pytest.mark.parametrize("decision", ["approve", "partial_refund"])
+def test_repository_rejects_refund_approval_for_zero_requested_amount(
+    decision: str,
+) -> None:
+    store = DatabaseStore()
+    store.approval["amount_requested"] = Decimal("0.00")
+    store.approval["requested_amount"] = Decimal("0.00")
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    with pytest.raises(ValueError, match="exceeds the requested amount"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision=decision,
+            resolved_amount=Decimal("1.00"),
+            reviewer="manager@example.com",
+            notes="Attempt a refund against a zero request.",
+        )
+
+    assert connections[0].rolled_back and not connections[0].committed
+    assert store.approval["status"] == "pending"
+
+
 def test_repository_allows_triage_approval_to_claim_policy_continuation() -> None:
     store = DatabaseStore()
     store.approval["approved_next_agent"] = "policy_agent"
@@ -1419,6 +1565,25 @@ def test_repository_allows_triage_approval_to_claim_policy_continuation() -> Non
     assert result.next_agent == "policy_agent"
     assert store.workflow == {"status": "running", "current_agent": "policy_agent"}
     assert store.approval_handoffs[0][3] == "policy_agent"
+
+
+def test_repository_rejects_partial_refund_decision_for_non_refund_route() -> None:
+    store = DatabaseStore()
+    store.approval["approved_next_agent"] = "policy_agent"
+    connections: list[DatabaseConnection] = []
+    repository = _database_repository(store, connections)
+
+    with pytest.raises(ValueError, match="only for refund continuations"):
+        repository.resolve_human_approval(
+            trace_id="demo07",
+            decision="partial_refund",
+            resolved_amount=None,
+            reviewer="security-reviewer@example.com",
+            notes="This decision is invalid for a Policy continuation.",
+        )
+
+    assert connections[0].rolled_back and not connections[0].committed
+    assert store.approval["status"] == "pending"
 
 
 def test_repository_same_resolution_is_idempotent_but_conflict_is_rejected() -> None:
@@ -2502,6 +2667,8 @@ def test_repository_rejects_every_trace_outside_exact_demo_allowlist(trace_id: s
         ("deny", None, "", "Reviewed", "reviewer is required"),
         ("deny", None, "manager", "", "notes are required"),
         ("approve", 1.001, "manager", "Reviewed", "two decimal places"),
+        ("approve", 1e28, "manager", "Reviewed", "supported monetary range"),
+        ("approve", 1e100, "manager", "Reviewed", "supported monetary range"),
     ],
 )
 def test_repository_validates_resolution_fields_before_connecting(

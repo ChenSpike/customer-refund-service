@@ -54,9 +54,15 @@ class ApprovalResolutionRequest(BaseModel):
             raise ValueError("resolved_amount must be a finite monetary value") from exc
         if not amount.is_finite():
             raise ValueError("resolved_amount must be a finite monetary value")
-        if amount != amount.quantize(Decimal("0.01")):
+        try:
+            quantized = amount.quantize(Decimal("0.01"))
+        except InvalidOperation as exc:
+            raise ValueError(
+                "resolved_amount is outside the supported monetary range"
+            ) from exc
+        if amount != quantized:
             raise ValueError("resolved_amount must have at most two decimal places")
-        return amount.quantize(Decimal("0.01"))
+        return quantized
 
     @model_validator(mode="after")
     def validate_decision_amount(self) -> "ApprovalResolutionRequest":

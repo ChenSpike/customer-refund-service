@@ -113,14 +113,20 @@ function App() {
     }
   }, []);
 
+  const loadHealth = useCallback(async () => {
+    try {
+      const response = await getHealth();
+      setHealth(response.data);
+    } catch (error) {
+      setHealth(error.response?.data || { status: 'offline' });
+    }
+  }, []);
+
   const refreshDashboard = useCallback(async () => {
-    await Promise.all([loadCases(), loadPendingApprovalCount()]);
-  }, [loadCases, loadPendingApprovalCount]);
+    await Promise.all([loadCases(), loadPendingApprovalCount(), loadHealth()]);
+  }, [loadCases, loadPendingApprovalCount, loadHealth]);
 
   useEffect(() => {
-    getHealth()
-      .then((res) => setHealth(res.data))
-      .catch((err) => setHealth(err.response?.data || { status: 'offline' }));
     refreshDashboard();
     const interval = setInterval(refreshDashboard, 8000);
     return () => clearInterval(interval);
@@ -154,7 +160,9 @@ function App() {
   };
 
   const fallbackPendingCount = cases.filter(
-    (caseItem) => caseItem.status === 'manual_review' || caseItem.status === 'quarantined'
+    (caseItem) => caseItem.status === 'pending_review'
+      || caseItem.status === 'manual_review'
+      || caseItem.status === 'quarantined'
   ).length;
   const pendingCount = pendingApprovalCount ?? fallbackPendingCount;
 

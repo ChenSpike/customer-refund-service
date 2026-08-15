@@ -1110,17 +1110,17 @@ class GCPRepository:
 				raise HumanApprovalStateError(
 					f"{trace_id}: unsupported human-approval continuation route {next_agent!r}"
 				)
-			normalized_amount = _validate_review_amount(
-				trace_id=trace_id,
-				decision=normalized_decision,
-				resolved_amount=normalized_amount,
-				next_agent=next_agent,
-				amount_requested=_optional_decimal(row.get("amount_requested")),
-				order_lookup=state["order_lookup_result"],
-			)
-
 			idempotent = row["status"] != "pending"
 			if idempotent:
+				# A resolved row is the durable contract for an exact replay.  New
+				# validation rules apply only while resolving a pending decision;
+				# otherwise a rule deployment could turn a formerly valid, already
+				# persisted request into HTTP 422 instead of returning idempotently.
+				replay_amount = _canonical_replay_amount(
+					decision=normalized_decision,
+					resolved_amount=normalized_amount,
+					next_agent=next_agent,
+				)
 				stored = (
 					str(row.get("status") or ""),
 					str(row.get("decision") or ""),
@@ -1131,7 +1131,7 @@ class GCPRepository:
 				requested = (
 					resolution_status,
 					normalized_decision,
-					normalized_amount,
+					replay_amount,
 					normalized_reviewer,
 					normalized_notes,
 				)
@@ -1139,7 +1139,18 @@ class GCPRepository:
 					raise HumanApprovalConflictError(
 						f"{trace_id}: approval was already resolved with a different decision"
 					)
+				# Preserve the database's canonical representation (notably NULL for
+				# zero/omitted non-refund amounts) in the reconstructed state/result.
+				normalized_amount = stored[2]
 			else:
+				normalized_amount = _validate_review_amount(
+					trace_id=trace_id,
+					decision=normalized_decision,
+					resolved_amount=normalized_amount,
+					next_agent=next_agent,
+					amount_requested=_optional_decimal(row.get("amount_requested")),
+					order_lookup=state["order_lookup_result"],
+				)
 				cursor.execute(
 					"""
 					UPDATE human_approvals
@@ -2647,9 +2658,15 @@ def _optional_decimal(value: Any) -> Decimal | None:
 		raise ValueError("resolved_amount must be a finite monetary value") from error
 	if not amount.is_finite():
 		raise ValueError("resolved_amount must be a finite monetary value")
-	if amount != amount.quantize(Decimal("0.01")):
+	try:
+		quantized = amount.quantize(Decimal("0.01"))
+	except InvalidOperation as error:
+		raise ValueError(
+			"resolved_amount is outside the supported monetary range"
+		) from error
+	if amount != quantized:
 		raise ValueError("resolved_amount must have at most two decimal places")
-	return amount.quantize(Decimal("0.01"))
+	return quantized
 
 
 def _validate_review_amount(
@@ -2666,6 +2683,8 @@ def _validate_review_amount(
 			raise ValueError("deny decisions cannot include a resolved refund amount")
 		return None
 	if next_agent != "refund_agent":
+		if decision == "partial_refund":
+			raise ValueError("partial_refund is available only for refund continuations")
 		if resolved_amount not in {None, Decimal("0.00")}:
 			raise ValueError("non-refund continuations cannot include a resolved refund amount")
 		return None
@@ -2674,14 +2693,52 @@ def _validate_review_amount(
 	amount_paid = _optional_decimal(order_lookup.get("amount_paid")) or Decimal("0.00")
 	prior_refund = _optional_decimal(order_lookup.get("prior_refund_total")) or Decimal("0.00")
 	remaining = max(Decimal("0.00"), amount_paid - prior_refund)
+	if decision == "approve" and amount_requested is not None and amount_requested > remaining:
+		raise ValueError(
+			f"{trace_id}: full approval is unavailable because the requested amount "
+			f"{amount_requested:.2f} exceeds the remaining refundable amount {remaining:.2f}; "
+			"use partial_refund"
+		)
 	if resolved_amount > remaining:
 		raise ValueError(
 			f"{trace_id}: resolved_amount exceeds the order's remaining refundable amount {remaining:.2f}"
 		)
 	if amount_requested is not None and resolved_amount > amount_requested:
 		raise ValueError(f"{trace_id}: resolved_amount exceeds the requested amount")
+	if decision == "approve":
+		full_amount = amount_requested if amount_requested is not None else remaining
+		full_amount_label = (
+			"requested amount" if amount_requested is not None else "remaining refundable amount"
+		)
+		if resolved_amount != full_amount:
+			raise ValueError(
+				f"{trace_id}: approve resolved_amount must equal the full "
+				f"{full_amount_label} {full_amount:.2f}"
+			)
 	if decision == "partial_refund" and amount_requested is not None and resolved_amount >= amount_requested:
 		raise ValueError("partial_refund must be less than the requested amount")
+	if decision == "partial_refund" and amount_requested is None and resolved_amount >= remaining:
+		raise ValueError("partial_refund must be less than the remaining refundable amount")
+	return resolved_amount
+
+
+def _canonical_replay_amount(
+	*,
+	decision: str,
+	resolved_amount: Decimal | None,
+	next_agent: str,
+) -> Decimal | None:
+	"""Canonicalize only amount shapes that were historically stored as NULL.
+
+	Resolved rows are compared against their persisted decision before current
+	eligibility rules run.  Denials and non-refund approvals accepted either an
+	omitted amount or explicit zero and persisted both as NULL, so exact replay
+	must preserve that equivalence without reopening monetary validation.
+	"""
+
+	if decision == "deny" or next_agent != "refund_agent":
+		if resolved_amount in {None, Decimal("0.00")}:
+			return None
 	return resolved_amount
 
 
