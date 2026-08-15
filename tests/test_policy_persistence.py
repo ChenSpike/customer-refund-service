@@ -46,6 +46,7 @@ class RecordingRepository:
         self.source = source
         self.fail = fail
         self.persisted: list[tuple] = []
+        self.persisted_kwargs: list[dict[str, object]] = []
         self.refunds: list[dict[str, object]] = []
         self.agent_handoffs: list[dict[str, object]] = []
         self.failures: list[tuple[str, Exception]] = []
@@ -54,8 +55,9 @@ class RecordingRepository:
     def fetch_source_handoffs(self, _mode, _trace_id=None):
         return [self.source] if self.source is not None else []
 
-    def persist_result(self, *args):
+    def persist_result(self, *args, **kwargs):
         self.persisted.append(args)
+        self.persisted_kwargs.append(kwargs)
         if self.fail:
             raise RuntimeError("database write failed")
         return "21"
@@ -109,6 +111,29 @@ def test_parent_policy_path_is_json_serializable_and_persists_once() -> None:
         "human_approval_count": 0,
     }
     assert result["final_outcome"] == "routed"
+
+
+def test_policy_persistence_propagates_human_approval_claim() -> None:
+    policy_input = make_input()
+    repository = RecordingRepository()
+    graph = build_policy_agent_graph(
+        FakeAzureClient(make_policy_result(policy_input)),
+        store=PipelineStore(repository),
+    )
+    state = _state(policy_input)
+    state["request_context"] = {
+        "continuation_type": "human_approval",
+        "approval_id": "approval-demo07",
+        "approval_claim_token": "claim-demo07",
+        "approval_attempt": 2,
+        "approval_sequence": 43,
+    }
+
+    graph.invoke(state)
+
+    assert repository.persisted_kwargs == [
+        {"approval_claim_token": "claim-demo07"}
+    ]
 
 
 def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
@@ -213,6 +238,33 @@ def test_response_persistence_writes_backend_and_returns_handoff_id() -> None:
             "current_agent": "completed",
         }
     ]
+
+
+def test_pipeline_persistence_propagates_human_approval_claim_to_response_writer() -> None:
+    repository = RecordingRepository()
+    PipelineStore(repository).persist_response_state(
+        {
+            "trace_id": "demo07",
+            "ticket_id": "ticket-demo07",
+            "message": "Please review the remainder.",
+            "user_id": "customer-demo07",
+            "request_context": {
+                "continuation_type": "human_approval",
+                "approval_id": "approval-demo07",
+                "approval_claim_token": "claim-demo07",
+                "approval_attempt": 1,
+                "approval_sequence": 42,
+            },
+            "response_result": {
+                "final_outcome": "partial_refund",
+                "workflow_status": "completed",
+            },
+            "response_governance_result": {"status": "allow", "findings": []},
+            "response_handoff": "end",
+        }
+    )
+
+    assert repository.agent_handoffs[0]["approval_claim_token"] == "claim-demo07"
 
 
 def test_parent_additive_state_receives_policy_deltas_exactly_once() -> None:

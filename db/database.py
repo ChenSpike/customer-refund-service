@@ -174,6 +174,9 @@ class HumanApprovalResolution:
 	idempotent: bool
 	continuation_complete: bool
 	continuation_resumable: bool
+	continuation_claim_token: str | None
+	continuation_attempt: int | None
+	continuation_sequence: int | None
 
 
 class GCPRepository:
@@ -348,17 +351,19 @@ class GCPRepository:
 		statement: GovernanceStatement,
 		*,
 		followup_claim_token: str | None = None,
+		approval_claim_token: str | None = None,
 	) -> str:
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			_require_active_followup_claim(
+			continuation_marker = _require_active_continuation_claim(
 				cursor,
 				trace_id=statement.trace_id,
-				claim_token=followup_claim_token,
+				followup_claim_token=followup_claim_token,
+				approval_claim_token=approval_claim_token,
 			)
-			if followup_claim_token is None:
+			if continuation_marker is None:
 				cursor.execute(
 					"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = %s ORDER BY created_at",
 					(statement.trace_id, statement.agent),
@@ -374,14 +379,14 @@ class GCPRepository:
 					f"{statement.trace_id}:{statement.agent}",
 				)
 			else:
-				# A resumed customer turn is a distinct governance decision.  The
-				# token-derived key also makes a same-attempt retry idempotent.
+				# A resumed turn is a distinct governance decision. The durable
+				# claim identity also makes a same-attempt retry idempotent.
 				event_id = self._next_prefixed_id(
 					cursor,
 					"governance_events",
 					"event_id",
 					"GOV-STM-",
-					f"{statement.trace_id}:{statement.agent}:customer_followup:{followup_claim_token}",
+					f"{statement.trace_id}:{statement.agent}:{_continuation_identity(continuation_marker)}",
 				)
 			owasp_category = _statement_owasp_category(statement)
 			trigger_score = _statement_trigger_score(statement)
@@ -389,6 +394,7 @@ class GCPRepository:
 			flags_payload = _with_continuation_marker(
 				_statement_flags_payload(statement),
 				followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
 			offending_content = _statement_offending_content(statement)
 			cursor.execute(
@@ -502,41 +508,53 @@ class GCPRepository:
 		findings: list[GovernanceFinding],
 		usage: TokenUsage,
 		followup_claim_token: str | None = None,
+		approval_claim_token: str | None = None,
 	) -> str:
 		trace_id = policy_input.case.trace_id
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			_require_active_followup_claim(
+			continuation_marker = _require_active_continuation_claim(
 				cursor,
 				trace_id=trace_id,
-				claim_token=followup_claim_token,
+				followup_claim_token=followup_claim_token,
+				approval_claim_token=approval_claim_token,
 			)
 			# Lock and reject resolved review history before replacing Policy
 			# handoffs, review events, or governance events.  This keeps a legacy
 			# trigger FK (including an unexpected cascading FK) from deleting a
 			# resolved approval before the rerun safety check can see it.
-			self._assert_policy_approval_history_mutable(cursor, trace_id)
+			self._assert_policy_approval_history_mutable(
+				cursor,
+				trace_id,
+				continuation_marker=continuation_marker,
+			)
 			handoff_id = self._upsert_handoff(
 				cursor,
 				policy_input,
 				output,
 				usage,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
 			policy_event_id = self._persist_policy_review(
 				cursor,
 				output,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
 			governance_event_ids = self._persist_governance(
 				cursor,
 				output,
 				findings,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
-			self._persist_human_approval(cursor, output, policy_event_id, governance_event_ids)
+			self._persist_human_approval(
+				cursor,
+				output,
+				policy_event_id,
+				governance_event_ids,
+				continuation_marker=continuation_marker,
+			)
 			audit_payload = {
 				"handoff_id": handoff_id,
 				"input_tokens": usage.input_tokens,
@@ -550,8 +568,12 @@ class GCPRepository:
 					"record_count": len(precedent_context.records),
 				},
 			}
-			audit_payload = _with_continuation_marker(audit_payload, followup_claim_token)
-			if followup_claim_token is None:
+			audit_payload = _with_continuation_marker(
+				audit_payload,
+				followup_claim_token,
+				continuation_marker=continuation_marker,
+			)
+			if continuation_marker is None:
 				cursor.execute(
 					"DELETE FROM audit_log WHERE trace_id = %s "
 					"AND event_type = 'policy_agent_evaluated' AND agent = 'policy_agent'",
@@ -598,16 +620,18 @@ class GCPRepository:
 		workflow_status: str,
 		current_agent: str,
 		followup_claim_token: str | None = None,
+		approval_claim_token: str | None = None,
 	) -> str:
 		database_status = _database_workflow_status(workflow_status)
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			_require_active_followup_claim(
+			continuation_marker = _require_active_continuation_claim(
 				cursor,
 				trace_id=trace_id,
-				claim_token=followup_claim_token,
+				followup_claim_token=followup_claim_token,
+				approval_claim_token=approval_claim_token,
 			)
 			handoff_id = self._upsert_generic_handoff(
 				cursor,
@@ -619,11 +643,11 @@ class GCPRepository:
 				output_payload=output_payload,
 				input_tokens=input_tokens,
 				output_tokens=output_tokens,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
 			# Retried stages replace their canonical audit event instead of
 			# accumulating misleading duplicate evaluations.
-			if followup_claim_token is None:
+			if continuation_marker is None:
 				cursor.execute(
 					"DELETE FROM audit_log WHERE trace_id = %s AND event_type = %s AND agent = %s",
 					(trace_id, audit_event_type, from_agent),
@@ -646,7 +670,7 @@ class GCPRepository:
 							"output": output_payload,
 							"input_tokens": input_tokens,
 							"output_tokens": output_tokens,
-						}, followup_claim_token),
+						}, followup_claim_token, continuation_marker=continuation_marker),
 						ensure_ascii=False,
 					),
 				),
@@ -679,6 +703,7 @@ class GCPRepository:
 		order_lookup_result: dict[str, Any],
 		refund_result: dict[str, Any],
 		followup_claim_token: str | None = None,
+		approval_claim_token: str | None = None,
 	) -> tuple[str, str]:
 		"""Persist one idempotent refund transaction, handoff, audit row, and route."""
 
@@ -691,31 +716,45 @@ class GCPRepository:
 		amount = float(refund_result.get("amount") or 0)
 		if transaction_status == "issued" and amount <= 0:
 			raise CloudDatabaseError("Issued refund requires a positive amount")
-		transaction_identity = f"idox-refund:{trace_id}"
-		if followup_claim_token is not None:
-			transaction_identity += f":customer_followup:{followup_claim_token}"
-		transaction_id = str(uuid.uuid5(uuid.NAMESPACE_URL, transaction_identity))
-
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			_require_active_followup_claim(
+			continuation_marker = _require_active_continuation_claim(
 				cursor,
 				trace_id=trace_id,
-				claim_token=followup_claim_token,
+				followup_claim_token=followup_claim_token,
+				approval_claim_token=approval_claim_token,
 			)
-			cursor.execute(
-				"""
-				SELECT approval_id FROM human_approvals
-				WHERE trace_id = %s AND status = 'approved'
-				ORDER BY resolved_at DESC, created_at DESC
-				LIMIT 1
-				""",
-				(trace_id,),
-			)
-			approval = cursor.fetchone()
-			approval_id = approval[0] if approval else None
+			transaction_identity = f"idox-refund:{trace_id}"
+			if continuation_marker is not None:
+				if continuation_marker.get("type") == "human_approval":
+					transaction_identity += (
+						f":human_approval:{continuation_marker['approval_id']}"
+					)
+				else:
+					transaction_identity += f":{_continuation_identity(continuation_marker)}"
+			transaction_id = str(uuid.uuid5(uuid.NAMESPACE_URL, transaction_identity))
+			if (
+				continuation_marker is not None
+				and continuation_marker.get("type") == "human_approval"
+			):
+				# The refund identity and FK must name the same reviewed approval.
+				# Choosing "latest approved" is unsafe once one workflow has more
+				# than one approval in its append-only history.
+				approval_id = str(continuation_marker["approval_id"])
+			else:
+				cursor.execute(
+					"""
+					SELECT approval_id FROM human_approvals
+					WHERE trace_id = %s AND status = 'approved'
+					ORDER BY resolved_at DESC, created_at DESC
+					LIMIT 1
+					""",
+					(trace_id,),
+				)
+				approval = cursor.fetchone()
+				approval_id = approval[0] if approval else None
 			cursor.execute(
 				"""
 				INSERT INTO refund_transactions (
@@ -750,9 +789,9 @@ class GCPRepository:
 				output_payload={"refund_result": refund_result},
 				input_tokens=0,
 				output_tokens=0,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
-			if followup_claim_token is None:
+			if continuation_marker is None:
 				cursor.execute(
 					"DELETE FROM audit_log WHERE trace_id = %s AND agent = 'refund_agent'",
 					(trace_id,),
@@ -770,7 +809,7 @@ class GCPRepository:
 							"transaction_id": transaction_id,
 							"handoff_id": handoff_id,
 							"refund_result": refund_result,
-						}, followup_claim_token),
+						}, followup_claim_token, continuation_marker=continuation_marker),
 						ensure_ascii=False,
 					),
 				),
@@ -800,6 +839,8 @@ class GCPRepository:
 		stage: str,
 		policy_decision: dict[str, Any] | None = None,
 		followup_claim_token: str | None = None,
+		approval_claim_token: str | None = None,
+		trigger_continuation_marker: dict[str, Any] | None = None,
 	) -> str:
 		"""Create the one pending review row for a routed workflow, idempotently."""
 
@@ -816,10 +857,18 @@ class GCPRepository:
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			_require_active_followup_claim(
+			continuation_marker = _require_active_continuation_claim(
 				cursor,
 				trace_id=trace_id,
-				claim_token=followup_claim_token,
+				followup_claim_token=followup_claim_token,
+				approval_claim_token=approval_claim_token,
+			)
+			governance_trigger_marker = _validated_governance_trigger_marker(
+				cursor,
+				trace_id=trace_id,
+				stage_agent=stage_agent,
+				active_marker=continuation_marker,
+				requested_marker=trigger_continuation_marker,
 			)
 			cursor.execute(
 				"SELECT approval_id FROM human_approvals "
@@ -835,18 +884,14 @@ class GCPRepository:
 				connection.commit()
 				return existing[0]
 
-			cursor.execute(
-				"""
-				SELECT event_id FROM governance_events
-				WHERE trace_id = %s AND agent = %s
-				  AND interceptor_action IN ('block', 'quarantine')
-				ORDER BY created_at DESC, event_id DESC LIMIT 1
-				""",
-				(trace_id, stage_agent),
+			governance_event_id = _select_approval_governance_trigger(
+				cursor,
+				trace_id=trace_id,
+				agent=stage_agent,
+				continuation_marker=governance_trigger_marker,
 			)
-			governance_event = cursor.fetchone()
-			if governance_event:
-				trigger_type, trigger_id = "governance", governance_event[0]
+			if governance_event_id:
+				trigger_type, trigger_id = "governance", governance_event_id
 			elif stage == "policy":
 				cursor.execute(
 					"""
@@ -976,6 +1021,16 @@ class GCPRepository:
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor(dictionary=True)
+			# Every approval resolver and fenced writer serializes on the same
+			# workflow row before it reads the latest claim. This prevents an old
+			# worker from validating claim N, waiting on the workflow, and writing
+			# after another resolver has committed claim N+1.
+			cursor.execute(
+				"SELECT status FROM workflow_runs WHERE trace_id = %s FOR UPDATE",
+				(trace_id,),
+			)
+			if cursor.fetchone() is None:
+				raise HumanApprovalNotFoundError(f"{trace_id}: workflow does not exist")
 			cursor.execute(
 				"""
 				SELECT
@@ -992,7 +1047,9 @@ class GCPRepository:
 				  tickets.currency AS ticket_currency,
 				  customers.email AS customer_email,
 				  customers.full_name AS customer_name,
-				  governance.agent AS governance_agent
+				  governance.agent AS governance_agent,
+				  governance.flags_json AS governance_flags,
+				  policy_review.evidence_json AS policy_review_evidence
 				FROM human_approvals approvals
 				JOIN workflow_runs workflows ON workflows.trace_id = approvals.trace_id
 				JOIN tickets ON tickets.ticket_id = workflows.ticket_id
@@ -1000,6 +1057,9 @@ class GCPRepository:
 				LEFT JOIN governance_events governance
 				  ON approvals.triggering_event_type = 'governance'
 				 AND governance.event_id = approvals.triggering_event_id
+				LEFT JOIN policy_review_events policy_review
+				  ON approvals.triggering_event_type = 'policy_review'
+				 AND policy_review.policy_review_event_id = approvals.triggering_event_id
 				WHERE approvals.trace_id = %s
 				ORDER BY approvals.created_at DESC
 				FOR UPDATE
@@ -1024,7 +1084,17 @@ class GCPRepository:
 					)
 				row = pending[0] if pending else rows[0]
 
-			state = _reconstruct_review_state(cursor, row)
+			_assert_parent_approval_continuation_complete(cursor, row)
+			continuation_record = _approval_continuation_record(
+				cursor,
+				trace_id=trace_id,
+				approval_id=str(row["approval_id"]),
+			)
+			state = _reconstruct_review_state(
+				cursor,
+				row,
+				continuation_record=continuation_record,
+			)
 			resolution_status = (
 				"approved" if normalized_decision in {"approve", "partial_refund"} else "rejected"
 			)
@@ -1147,12 +1217,9 @@ class GCPRepository:
 				)
 				_require_workflow_row(cursor, trace_id)
 
-			continuation_complete = _approval_continuation_complete(
-				cursor,
-				trace_id=trace_id,
-				approval_id=str(row["approval_id"]),
-			)
+			continuation_complete = continuation_record is not None
 			continuation_resumable = False
+			active_claim: dict[str, Any] | None = None
 			if not continuation_complete:
 				claim = _approval_continuation_claim(
 					cursor,
@@ -1167,13 +1234,15 @@ class GCPRepository:
 					or claim_age >= continuation_stale_after_seconds
 				)
 				if continuation_resumable:
-					_upsert_approval_continuation_claim(
+					active_claim = _append_approval_continuation_claim(
 						cursor,
 						trace_id=trace_id,
 						approval_id=str(row["approval_id"]),
 						next_agent=next_agent,
 						existing_claim=claim,
 					)
+				else:
+					active_claim = claim
 			state = _apply_review_resolution_to_state(
 				state,
 				approval_id=str(row["approval_id"]),
@@ -1185,8 +1254,19 @@ class GCPRepository:
 				next_agent=next_agent,
 			)
 			if idempotent:
-				state["workflow_status"] = str(row.get("workflow_status") or "completed")
-				state["current_stage"] = str(row.get("current_agent") or "completed")
+				if continuation_record is not None:
+					state["workflow_status"] = str(
+						continuation_record.get("workflow_status") or "completed"
+					)
+					state["current_stage"] = str(
+						continuation_record.get("current_agent") or "completed"
+					)
+					state["human_approval_continuation_summary"] = dict(
+						continuation_record.get("summary") or {}
+					)
+				else:
+					state["workflow_status"] = str(row.get("workflow_status") or "completed")
+					state["current_stage"] = str(row.get("current_agent") or "completed")
 			connection.commit()
 			return HumanApprovalResolution(
 				approval_id=str(row["approval_id"]),
@@ -1203,6 +1283,21 @@ class GCPRepository:
 				idempotent=idempotent,
 				continuation_complete=continuation_complete,
 				continuation_resumable=continuation_resumable,
+				continuation_claim_token=(
+					str((active_claim or {}).get("payload", {}).get("claim_token"))
+					if active_claim is not None
+					else None
+				),
+				continuation_attempt=(
+					int((active_claim or {}).get("payload", {}).get("attempt"))
+					if active_claim is not None
+					else None
+				),
+				continuation_sequence=(
+					int((active_claim or {}).get("log_id"))
+					if active_claim is not None
+					else None
+				),
 			)
 		except Exception:
 			connection.rollback()
@@ -1218,6 +1313,7 @@ class GCPRepository:
 		workflow_status: str,
 		current_agent: str,
 		summary: dict[str, Any],
+		approval_claim_token: str,
 	) -> bool:
 		"""Persist the terminal marker for a successful continuation."""
 
@@ -1230,53 +1326,68 @@ class GCPRepository:
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor(dictionary=True)
-			cursor.execute(
-				"SELECT approval_id, status FROM human_approvals "
-				"WHERE trace_id = %s AND approval_id = %s FOR UPDATE",
-				(trace_id, approval_id),
-			)
-			row = cursor.fetchone()
-			if row is None:
-				raise HumanApprovalNotFoundError(f"{trace_id}: approval does not exist")
-			if row["status"] == "pending":
-				raise HumanApprovalConflictError(
-					f"{trace_id}: pending approval cannot be marked continued"
-				)
-			existing_marker = _approval_continuation_record(
+			continuation_marker, existing_marker = _lock_approval_claim(
 				cursor,
 				trace_id=trace_id,
-				approval_id=approval_id,
+				claim_token=approval_claim_token,
 			)
+			if continuation_marker.get("approval_id") != approval_id:
+				raise HumanApprovalConflictError(
+					f"{trace_id}: continuation claim belongs to a different approval"
+				)
 			if existing_marker is not None:
+				existing_continuation = existing_marker.get("_continuation") or {}
 				if (
 					existing_marker.get("workflow_status") != workflow_status
 					or existing_marker.get("current_agent") != current_agent
+					or existing_marker.get("summary") != summary
+					or existing_continuation.get("claim_token")
+					!= approval_claim_token
 				):
 					raise HumanApprovalConflictError(
 						f"{trace_id}: continuation was already completed with a different terminal state"
 					)
 				connection.commit()
 				return False
-			else:
-				cursor.execute(
-					"""
-					INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
-					VALUES (%s, 'human_approval_continued', 'human_approval', %s)
-					""",
-					(
-						trace_id,
-						json.dumps(
-							{
-								"approval_id": approval_id,
-								"workflow_status": workflow_status,
-								"current_agent": current_agent,
-								"summary": summary,
-							},
-							ensure_ascii=False,
-							default=str,
-						),
-					),
+			cursor.execute(
+				"SELECT approval_id FROM human_approvals "
+				"WHERE trace_id = %s AND status = 'pending' "
+				"ORDER BY created_at, approval_id FOR UPDATE",
+				(trace_id,),
+			)
+			pending_approvals = [
+				str(row.get("approval_id") if isinstance(row, dict) else row[0])
+				for row in cursor.fetchall()
+			]
+			expected_pending = str(summary.get("new_approval_id") or "").strip()
+			if workflow_status == "pending_human":
+				if len(pending_approvals) != 1 or pending_approvals[0] != expected_pending:
+					raise HumanApprovalConflictError(
+						f"{trace_id}: pending_human terminal state requires its exact pending approval"
+					)
+			elif pending_approvals:
+				raise HumanApprovalConflictError(
+					f"{trace_id}: terminal continuation cannot bypass a pending approval"
 				)
+			cursor.execute(
+				"""
+				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
+				VALUES (%s, 'human_approval_continued', 'human_approval', %s)
+				""",
+				(
+					trace_id,
+					json.dumps(
+						_with_continuation_marker({
+							"approval_id": approval_id,
+							"workflow_status": workflow_status,
+							"current_agent": current_agent,
+							"summary": summary,
+						}, None, continuation_marker=continuation_marker),
+						ensure_ascii=False,
+						default=str,
+					),
+				),
+			)
 			cursor.execute(
 				"""
 				UPDATE workflow_runs
@@ -1302,6 +1413,7 @@ class GCPRepository:
 		trace_id: str,
 		approval_id: str,
 		error: Exception,
+		approval_claim_token: str,
 	) -> None:
 		"""Fail closed if an approved continuation cannot finish."""
 
@@ -1310,11 +1422,20 @@ class GCPRepository:
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
-			payload = {
+			continuation_marker = _require_active_approval_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=approval_claim_token,
+			)
+			if continuation_marker.get("approval_id") != approval_id:
+				raise HumanApprovalConflictError(
+					f"{trace_id}: continuation claim belongs to a different approval"
+				)
+			payload = _with_continuation_marker({
 				"approval_id": approval_id,
 				"error_type": type(error).__name__,
 				"message": str(error)[:500],
-			}
+			}, None, continuation_marker=continuation_marker)
 			cursor.execute(
 				"""
 				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
@@ -1333,6 +1454,37 @@ class GCPRepository:
 			)
 			_require_workflow_row(cursor, trace_id)
 			connection.commit()
+		except Exception:
+			connection.rollback()
+			raise
+		finally:
+			connection.close()
+
+	def heartbeat_human_approval_continuation(
+		self,
+		*,
+		trace_id: str,
+		approval_id: str,
+		approval_claim_token: str,
+	) -> bool:
+		"""Refresh a live review lease; return false after a terminal stage write."""
+
+		_validate_demo_trace_id(trace_id)
+		connection = self._connect()
+		try:
+			connection.start_transaction()
+			cursor = connection.cursor(dictionary=True)
+			continuation_marker = _require_active_approval_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=approval_claim_token,
+			)
+			if continuation_marker.get("approval_id") != approval_id:
+				raise HumanApprovalConflictError(
+					f"{trace_id}: continuation claim belongs to a different approval"
+				)
+			connection.commit()
+			return True
 		except Exception:
 			connection.rollback()
 			raise
@@ -1728,9 +1880,9 @@ class GCPRepository:
 		output: PolicyAgentOutput,
 		usage: TokenUsage,
 		*,
-		followup_claim_token: str | None = None,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> str:
-		if followup_claim_token is None:
+		if continuation_marker is None:
 			cursor.execute(
 				"""
 				SELECT handoff_id FROM agent_handoffs
@@ -1750,15 +1902,17 @@ class GCPRepository:
 			handoff_id = self._next_handoff_id(
 				policy_input.case.trace_id,
 				"policy_agent",
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
 		input_payload = _with_continuation_marker(
 			policy_input.model_dump(mode="json"),
-			followup_claim_token,
+			None,
+			continuation_marker=continuation_marker,
 		)
 		output_payload = _with_continuation_marker(
 			output.model_dump(mode="json"),
-			followup_claim_token,
+			None,
+			continuation_marker=continuation_marker,
 		)
 		cursor.execute(
 			"""
@@ -1797,9 +1951,9 @@ class GCPRepository:
 		output_payload: dict[str, Any],
 		input_tokens: int,
 		output_tokens: int,
-		followup_claim_token: str | None = None,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> str:
-		if followup_claim_token is None:
+		if continuation_marker is None:
 			cursor.execute(
 				"""
 				SELECT handoff_id FROM agent_handoffs
@@ -1816,10 +1970,18 @@ class GCPRepository:
 			handoff_id = self._next_handoff_id(
 				trace_id,
 				from_agent,
-				followup_claim_token=followup_claim_token,
+				continuation_marker=continuation_marker,
 			)
-		marked_input = _with_continuation_marker(input_payload, followup_claim_token)
-		marked_output = _with_continuation_marker(output_payload, followup_claim_token)
+		marked_input = _with_continuation_marker(
+			input_payload,
+			None,
+			continuation_marker=continuation_marker,
+		)
+		marked_output = _with_continuation_marker(
+			output_payload,
+			None,
+			continuation_marker=continuation_marker,
+		)
 		cursor.execute(
 			"""
 			INSERT INTO agent_handoffs (
@@ -1851,10 +2013,10 @@ class GCPRepository:
 		cursor: Any,
 		output: PolicyAgentOutput,
 		*,
-		followup_claim_token: str | None = None,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> str | None:
 		existing: list[str] = []
-		if followup_claim_token is None:
+		if continuation_marker is None:
 			cursor.execute(
 				"SELECT policy_review_event_id FROM policy_review_events WHERE trace_id = %s ORDER BY created_at",
 				(output.case.trace_id,),
@@ -1870,11 +2032,9 @@ class GCPRepository:
 			"policy_review_events",
 			"policy_review_event_id",
 			"POL-REV-",
-			(
-				output.case.trace_id
-				if followup_claim_token is None
-				else f"{output.case.trace_id}:customer_followup:{followup_claim_token}"
-			),
+			output.case.trace_id
+			if continuation_marker is None
+			else f"{output.case.trace_id}:{_continuation_identity(continuation_marker)}",
 		)
 		gaps = output.policy_evaluation.gaps_or_conflicts
 		review_type = "low_confidence" if any(gap.type == "low_confidence" for gap in gaps) else "policy_rule"
@@ -1885,7 +2045,11 @@ class GCPRepository:
 			"matched_policies": [policy.model_dump(mode="json") for policy in output.policy_evaluation.matched_policies],
 			"gaps_or_conflicts": [gap.model_dump(mode="json") for gap in gaps],
 		}
-		evidence = _with_continuation_marker(evidence, followup_claim_token)
+		evidence = _with_continuation_marker(
+			evidence,
+			None,
+			continuation_marker=continuation_marker,
+		)
 		cursor.execute(
 			"""
 			INSERT INTO policy_review_events (
@@ -1912,10 +2076,10 @@ class GCPRepository:
 		output: PolicyAgentOutput,
 		findings: list[GovernanceFinding],
 		*,
-		followup_claim_token: str | None = None,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> list[str]:
 		existing: list[str] = []
-		if followup_claim_token is None:
+		if continuation_marker is None:
 			cursor.execute(
 				"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = 'policy_agent' ORDER BY created_at",
 				(output.case.trace_id,),
@@ -1928,8 +2092,8 @@ class GCPRepository:
 		event_ids: list[str] = []
 		for index, finding in enumerate(findings):
 			identity = f"{output.case.trace_id}:{index}:{finding.flag}"
-			if followup_claim_token is not None:
-				identity += f":customer_followup:{followup_claim_token}"
+			if continuation_marker is not None:
+				identity += f":{_continuation_identity(continuation_marker)}"
 			event_id = existing[index] if index < len(existing) else self._next_prefixed_id(
 				cursor,
 				"governance_events",
@@ -1958,7 +2122,8 @@ class GCPRepository:
 					json.dumps(
 						_with_continuation_marker(
 							{"finding": finding.model_dump(mode="json"), "governance": output.governance.model_dump(mode="json")},
-							followup_claim_token,
+							None,
+							continuation_marker=continuation_marker,
 						),
 						ensure_ascii=False,
 					),
@@ -1973,8 +2138,14 @@ class GCPRepository:
 		output: PolicyAgentOutput,
 		policy_event_id: str | None,
 		governance_event_ids: list[str],
+		*,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> None:
-		self._assert_policy_approval_history_mutable(cursor, output.case.trace_id)
+		self._assert_policy_approval_history_mutable(
+			cursor,
+			output.case.trace_id,
+			continuation_marker=continuation_marker,
+		)
 		cursor.execute(
 			"SELECT approval_id, status FROM human_approvals "
 			"WHERE trace_id = %s AND approval_id LIKE 'POL-APP-%%' "
@@ -1990,12 +2161,15 @@ class GCPRepository:
 				(output.case.trace_id,),
 			)
 			return
+		approval_identity = output.case.trace_id
+		if continuation_marker is not None:
+			approval_identity += f":{_continuation_identity(continuation_marker)}"
 		approval_id = pending_rows[0][0] if pending_rows else self._next_prefixed_id(
 			cursor,
 			"human_approvals",
 			"approval_id",
 			"POL-APP-",
-			output.case.trace_id,
+			approval_identity,
 		)
 		trigger_type, trigger_id = _approval_trigger(output.case.trace_id, policy_event_id, governance_event_ids)
 		notes = {
@@ -2034,7 +2208,12 @@ class GCPRepository:
 		)
 
 	@staticmethod
-	def _assert_policy_approval_history_mutable(cursor: Any, trace_id: str) -> None:
+	def _assert_policy_approval_history_mutable(
+		cursor: Any,
+		trace_id: str,
+		*,
+		continuation_marker: dict[str, Any] | None = None,
+	) -> None:
 		cursor.execute(
 			"SELECT approval_id, status FROM human_approvals "
 			"WHERE trace_id = %s AND approval_id LIKE 'POL-APP-%%' "
@@ -2042,7 +2221,14 @@ class GCPRepository:
 			(trace_id,),
 		)
 		existing_rows = list(cursor.fetchall())
-		if any(row[1] in {"approved", "rejected"} for row in existing_rows):
+		allow_resolved_history = (
+			continuation_marker is not None
+			and continuation_marker.get("type") == "human_approval"
+		)
+		if (
+			not allow_resolved_history
+			and any(row[1] in {"approved", "rejected"} for row in existing_rows)
+		):
 			raise HumanApprovalConflictError(
 				f"{trace_id}: resolved Policy approval history prevents an unsafe Policy rerun"
 			)
@@ -2064,11 +2250,11 @@ class GCPRepository:
 		trace_id: str,
 		from_agent: str,
 		*,
-		followup_claim_token: str | None = None,
+		continuation_marker: dict[str, Any] | None = None,
 	) -> str:
 		identity = f"idox-handoff:{trace_id}:{from_agent}"
-		if followup_claim_token is not None:
-			identity += f":customer_followup:{followup_claim_token}"
+		if continuation_marker is not None:
+			identity += f":{_continuation_identity(continuation_marker)}"
 		return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
 
 	@staticmethod
@@ -2156,16 +2342,70 @@ def _validate_demo_trace_id(trace_id: str) -> str:
 def _with_continuation_marker(
 	payload: dict[str, Any],
 	claim_token: str | None,
+	*,
+	continuation_marker: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-	"""Return a JSON payload whose resumed customer turn is queryable."""
+	"""Return a JSON payload whose resumed turn is queryable."""
 
 	result = dict(payload)
-	if claim_token is not None:
-		result["_continuation"] = {
+	marker = continuation_marker
+	if marker is None and claim_token is not None:
+		marker = {
 			"type": "customer_followup",
 			"claim_token": claim_token,
 		}
+	if marker is not None:
+		result["_continuation"] = dict(marker)
 	return result
+
+
+def _continuation_identity(marker: dict[str, Any]) -> str:
+	continuation_type = str(marker.get("type") or "")
+	claim_token = str(marker.get("claim_token") or "").strip()
+	if not claim_token:
+		raise CloudDatabaseError("continuation marker is missing its claim token")
+	if continuation_type == "customer_followup":
+		return f"customer_followup:{claim_token}"
+	if continuation_type == "human_approval":
+		approval_id = str(marker.get("approval_id") or "").strip()
+		attempt = marker.get("attempt")
+		sequence = marker.get("sequence")
+		if (
+			not approval_id
+			or isinstance(attempt, bool)
+			or not isinstance(attempt, int)
+			or attempt < 1
+			or isinstance(sequence, bool)
+			or not isinstance(sequence, int)
+			or sequence < 1
+		):
+			raise CloudDatabaseError("human-approval continuation marker is incomplete")
+		return f"human_approval:{approval_id}:attempt:{attempt}:{claim_token}"
+	raise CloudDatabaseError(f"unsupported continuation marker type: {continuation_type!r}")
+
+
+def _require_active_continuation_claim(
+	cursor: Any,
+	*,
+	trace_id: str,
+	followup_claim_token: str | None,
+	approval_claim_token: str | None,
+) -> dict[str, Any] | None:
+	if followup_claim_token is not None and approval_claim_token is not None:
+		raise CloudDatabaseError(f"{trace_id}: overlapping continuation claims")
+	if followup_claim_token is not None:
+		return _require_active_followup_claim(
+			cursor,
+			trace_id=trace_id,
+			claim_token=followup_claim_token,
+		)
+	if approval_claim_token is not None:
+		return _require_active_approval_claim(
+			cursor,
+			trace_id=trace_id,
+			claim_token=approval_claim_token,
+		)
+	return None
 
 
 def _require_active_followup_claim(
@@ -2173,11 +2413,11 @@ def _require_active_followup_claim(
 	*,
 	trace_id: str,
 	claim_token: str | None,
-) -> None:
+) -> dict[str, Any] | None:
 	"""Fence every continuation write and heartbeat the newest durable lease."""
 
 	if claim_token is None:
-		return
+		return None
 	_validate_demo_trace_id(trace_id)
 	normalized_token = str(claim_token or "").strip()
 	if not normalized_token or len(normalized_token) > 64:
@@ -2243,6 +2483,132 @@ def _require_active_followup_claim(
 		"WHERE trace_id = %s AND status = 'running'",
 		(trace_id,),
 	)
+	return {
+		"type": "customer_followup",
+		"claim_token": normalized_token,
+	}
+
+
+def _require_active_approval_claim(
+	cursor: Any,
+	*,
+	trace_id: str,
+	claim_token: str,
+) -> dict[str, Any]:
+	"""Fence a review continuation and heartbeat its durable workflow lease."""
+
+	marker, completion = _lock_approval_claim(
+		cursor,
+		trace_id=trace_id,
+		claim_token=claim_token,
+	)
+	if completion is not None:
+		raise CloudDatabaseError(f"{trace_id}: human-approval continuation is already completed")
+	return marker
+
+
+def _lock_approval_claim(
+	cursor: Any,
+	*,
+	trace_id: str,
+	claim_token: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+	"""Serialize, validate, and lock the newest approval-continuation claim."""
+
+	_validate_demo_trace_id(trace_id)
+	normalized_token = str(claim_token or "").strip()
+	if not normalized_token or len(normalized_token) > 64:
+		raise CloudDatabaseError(f"{trace_id}: invalid human-approval claim token")
+	# The workflow row is the common per-trace mutex used by claim creation,
+	# heartbeats, stage persistence, failure handling, and completion. Read the
+	# latest claim only after this lock is held so a superseding resolver cannot
+	# commit between token validation and the protected write.
+	cursor.execute(
+		"SELECT status FROM workflow_runs WHERE trace_id = %s FOR UPDATE",
+		(trace_id,),
+	)
+	workflow = cursor.fetchone()
+	if workflow is None:
+		raise CloudDatabaseError(f"{trace_id}: workflow does not exist")
+	cursor.execute(
+		"SELECT log_id, payload_json FROM audit_log "
+		"WHERE trace_id = %s AND event_type = 'human_approval_continuation_claimed' "
+		"ORDER BY log_id DESC LIMIT 1 FOR UPDATE",
+		(trace_id,),
+	)
+	claim_row = cursor.fetchone()
+	if claim_row is None:
+		raise CloudDatabaseError(f"{trace_id}: human-approval continuation claim is missing")
+	log_id = claim_row.get("log_id") if isinstance(claim_row, dict) else claim_row[0]
+	payload_value = (
+		claim_row.get("payload_json") if isinstance(claim_row, dict) else claim_row[1]
+	)
+	payload = _json_object(payload_value)
+	if payload.get("claim_token") != normalized_token:
+		raise CloudDatabaseError(f"{trace_id}: stale human-approval claim token")
+	approval_id = str(payload.get("approval_id") or "").strip()
+	attempt = payload.get("attempt")
+	if (
+		not approval_id
+		or isinstance(attempt, bool)
+		or not isinstance(attempt, int)
+		or attempt < 1
+		or normalized_token
+		!= _approval_continuation_claim_token(trace_id, approval_id, attempt)
+	):
+		raise CloudDatabaseError(f"{trace_id}: invalid human-approval continuation claim")
+	cursor.execute(
+		"SELECT status FROM human_approvals "
+		"WHERE trace_id = %s AND approval_id = %s FOR UPDATE",
+		(trace_id, approval_id),
+	)
+	approval = cursor.fetchone()
+	if approval is None:
+		raise CloudDatabaseError(f"{trace_id}: claimed human approval does not exist")
+	approval_status = approval.get("status") if isinstance(approval, dict) else approval[0]
+	if approval_status == "pending":
+		raise CloudDatabaseError(f"{trace_id}: pending approval has no active continuation")
+	completion = _approval_continuation_record(
+		cursor,
+		trace_id=trace_id,
+		approval_id=approval_id,
+	)
+	cursor.execute(
+		"SELECT payload_json FROM audit_log "
+		"WHERE trace_id = %s AND event_type = 'human_approval_continuation_failed' "
+		"ORDER BY log_id DESC FOR UPDATE",
+		(trace_id,),
+	)
+	for failure_row in cursor.fetchall():
+		failure_value = (
+			failure_row.get("payload_json")
+			if isinstance(failure_row, dict)
+			else failure_row[0]
+		)
+		failure = _json_object(failure_value)
+		failure_marker = failure.get("_continuation") or {}
+		failure_token = failure.get("claim_token") or (
+			failure_marker.get("claim_token")
+			if isinstance(failure_marker, dict)
+			else None
+		)
+		if failure_token == normalized_token:
+			raise CloudDatabaseError(
+				f"{trace_id}: failed human-approval claim token is revoked"
+			)
+	if completion is None:
+		cursor.execute(
+			"UPDATE workflow_runs SET updated_at = CURRENT_TIMESTAMP "
+			"WHERE trace_id = %s",
+			(trace_id,),
+		)
+	return {
+		"type": "human_approval",
+		"approval_id": approval_id,
+		"claim_token": normalized_token,
+		"attempt": attempt,
+		"sequence": int(log_id),
+	}, completion
 
 
 def _validate_review_request(
@@ -2340,26 +2706,62 @@ def _json_scalar(value: Any) -> Any:
 	return value
 
 
-def _reconstruct_review_state(cursor: Any, approval_row: dict[str, Any]) -> dict[str, Any]:
+def _reconstruct_review_state(
+	cursor: Any,
+	approval_row: dict[str, Any],
+	*,
+	continuation_record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
 	"""Rebuild only the durable parent state needed by Refund and Response."""
 
 	trace_id = str(approval_row["trace_id"])
+	selected_approval_id = str(approval_row["approval_id"])
+	origin_sequence = _review_approval_origin_sequence(approval_row)
+	terminal_marker = (
+		continuation_record.get("_continuation")
+		if isinstance(continuation_record, dict)
+		else None
+	)
+	if terminal_marker is not None and not isinstance(terminal_marker, dict):
+		raise HumanApprovalStateError("terminal continuation marker must be an object")
+	if terminal_marker is not None:
+		_validate_review_human_approval_marker(
+			terminal_marker,
+			expected_approval_id=selected_approval_id,
+			trace_id=trace_id,
+			label="terminal",
+		)
 	cursor.execute(
 		"""
-		SELECT handoff_id, from_agent, to_agent, input_json, output_json
+		SELECT handoff_id, from_agent, to_agent, input_json, output_json, created_at
 		FROM agent_handoffs
 		WHERE trace_id = %s
 		ORDER BY created_at, handoff_id
 		""",
 		(trace_id,),
 	)
-	handoffs = list(cursor.fetchall())
+	handoffs = sorted(list(cursor.fetchall()), key=_review_handoff_sort_key)
 	preferred_order_ids: list[str] = []
 	triage_output: dict[str, Any] = {}
 	policy_decision: dict[str, Any] = {}
+	policy_handoff = ""
+	selected_policy_persistence: dict[str, Any] = {}
 	response_result: dict[str, Any] = {}
+	response_handoff = ""
+	selected_response_marker: dict[str, Any] = {}
+	refund_result: dict[str, Any] = {}
+	selected_refund_handoff_id = ""
 	requested_order_id = ""
 	for handoff in handoffs:
+		marker = _review_handoff_continuation_marker(handoff)
+		if not _review_handoff_is_in_approval_scope(
+			marker,
+			trace_id=trace_id,
+			selected_approval_id=selected_approval_id,
+			origin_sequence=origin_sequence,
+			terminal_marker=terminal_marker,
+		):
+			continue
 		input_payload = _json_object(handoff.get("input_json"))
 		output_payload = _json_object(handoff.get("output_json"))
 		candidate = input_payload.get("requested_order_id")
@@ -2379,10 +2781,78 @@ def _reconstruct_review_state(cursor: Any, approval_row: dict[str, Any]) -> dict
 				policy_decision = dict(projected)
 				if "decision" not in policy_decision and policy_decision.get("type"):
 					policy_decision["decision"] = policy_decision["type"]
+			handoff_payload = output_payload.get("handoff")
+			policy_handoff = str(
+				output_payload.get("policy_handoff")
+				or (
+					handoff_payload.get("next_agent")
+					if isinstance(handoff_payload, dict)
+					else ""
+				)
+				or handoff.get("to_agent")
+				or ""
+			)
+			if (
+				marker is not None
+				and marker.get("type") == "human_approval"
+				and marker.get("approval_id") == selected_approval_id
+			):
+				selected_policy_persistence = {
+					"handoff_id": str(handoff.get("handoff_id") or ""),
+					"trace_id": trace_id,
+					"next_agent": str(handoff.get("to_agent") or policy_handoff),
+				}
 		if handoff.get("from_agent") == "response_agent":
 			projected = output_payload.get("response_result")
 			if isinstance(projected, dict):
 				response_result = projected
+			response_handoff = str(
+				output_payload.get("response_handoff")
+				or (
+					"human_review"
+					if handoff.get("to_agent") == "human_approval"
+					else "end" if handoff.get("to_agent") == "end" else ""
+				)
+			)
+			if (
+				marker is not None
+				and marker.get("type") == "human_approval"
+				and marker.get("approval_id") == selected_approval_id
+			):
+				selected_response_marker = dict(marker)
+		if handoff.get("from_agent") == "refund_agent":
+			projected = output_payload.get("refund_result")
+			if isinstance(projected, dict):
+				refund_result = projected
+			if (
+				marker is not None
+				and marker.get("type") == "human_approval"
+				and marker.get("approval_id") == selected_approval_id
+			):
+				selected_refund_handoff_id = str(handoff.get("handoff_id") or "")
+
+	cursor.execute(
+		"""
+		SELECT transaction_id, approval_id, amount, currency, status,
+		       external_ref, created_at, updated_at
+		FROM refund_transactions
+		WHERE trace_id = %s AND approval_id = %s
+		ORDER BY created_at, transaction_id
+		""",
+		(trace_id, approval_row["approval_id"]),
+	)
+	linked_refunds = list(cursor.fetchall())
+	selected_refund_transaction_id = (
+		str(linked_refunds[-1].get("transaction_id") or "") if linked_refunds else ""
+	)
+	if linked_refunds and not refund_result:
+		refund = linked_refunds[-1]
+		refund_result = {
+			"status": "success" if refund.get("status") == "issued" else "failed",
+			"refund_id": refund.get("external_ref"),
+			"amount": _json_scalar(refund.get("amount")) or 0,
+			"currency": str(refund.get("currency") or "USD"),
+		}
 
 	cursor.execute(
 		"""
@@ -2431,7 +2901,22 @@ def _reconstruct_review_state(cursor: Any, approval_row: dict[str, Any]) -> dict
 		"order_lookup_result": order_lookup,
 		"triage_output": triage_output,
 		"policy_decision": policy_decision,
+		"policy_handoff": policy_handoff,
+		"policy_persistence_result": selected_policy_persistence,
+		"refund_result": refund_result,
+		"refund_persistence_result": (
+			{
+				"transaction_id": selected_refund_transaction_id,
+				"handoff_id": selected_refund_handoff_id,
+				"trace_id": trace_id,
+				"next_agent": "response_agent",
+			}
+			if selected_refund_transaction_id
+			else {}
+		),
 		"response_result": response_result,
+		"response_handoff": response_handoff,
+		"response_persistence_marker": selected_response_marker,
 		"review_trigger_stage": _review_trigger_stage(approval_row),
 		"review_trigger_reason": str(approval_row.get("reason") or "human_review"),
 		"workflow_status": str(approval_row.get("workflow_status") or "pending_human"),
@@ -2440,6 +2925,224 @@ def _reconstruct_review_state(cursor: Any, approval_row: dict[str, Any]) -> dict
 		"llm_output_tokens": 0,
 		"llm_usage_events": [],
 	}
+
+
+def _review_approval_origin_sequence(approval_row: dict[str, Any]) -> int:
+	"""Return the parent continuation sequence that created this approval."""
+
+	marker = _review_approval_trigger_marker(approval_row)
+	if marker is None:
+		return 0
+	if marker.get("type") != "human_approval":
+		return 0
+	_validate_review_human_approval_marker(
+		marker,
+		trace_id=str(approval_row.get("trace_id") or "") or None,
+		label="approval trigger",
+	)
+	sequence = marker.get("sequence")
+	assert isinstance(sequence, int)
+	parent_terminal_sequence = approval_row.get("_parent_terminal_sequence")
+	if (
+		isinstance(parent_terminal_sequence, int)
+		and not isinstance(parent_terminal_sequence, bool)
+	):
+		return max(sequence, parent_terminal_sequence)
+	return sequence
+
+
+def _review_approval_trigger_marker(
+	approval_row: dict[str, Any],
+) -> dict[str, Any] | None:
+	trigger_type = str(approval_row.get("triggering_event_type") or "")
+	payload_value = (
+		approval_row.get("governance_flags")
+		if trigger_type == "governance"
+		else approval_row.get("policy_review_evidence")
+		if trigger_type == "policy_review"
+		else None
+	)
+	marker = _json_object(payload_value).get("_continuation")
+	if marker is None:
+		return None
+	if not isinstance(marker, dict):
+		raise HumanApprovalStateError("approval trigger continuation marker must be an object")
+	return marker
+
+
+def _assert_parent_approval_continuation_complete(
+	cursor: Any,
+	approval_row: dict[str, Any],
+) -> None:
+	"""Keep a child review unavailable until its parent turn is terminal."""
+
+	marker = _review_approval_trigger_marker(approval_row)
+	if marker is None or marker.get("type") != "human_approval":
+		return
+	trace_id = str(approval_row["trace_id"])
+	_validate_review_human_approval_marker(
+		marker,
+		trace_id=trace_id,
+		label="approval trigger",
+	)
+	parent_approval_id = str(marker["approval_id"])
+	parent_record = _approval_continuation_record(
+		cursor,
+		trace_id=trace_id,
+		approval_id=parent_approval_id,
+	)
+	if parent_record is None:
+		raise HumanApprovalStateError(
+			f"{trace_id}: child approval is not available before its parent continuation completes"
+		)
+	terminal_marker = parent_record.get("_continuation")
+	if not isinstance(terminal_marker, dict):
+		raise HumanApprovalStateError(
+			f"{trace_id}: child approval parent terminal marker is missing"
+		)
+	_validate_review_human_approval_marker(
+		terminal_marker,
+		expected_approval_id=parent_approval_id,
+		trace_id=trace_id,
+		label="parent terminal",
+	)
+	trigger_sequence = marker.get("sequence")
+	terminal_sequence = terminal_marker.get("sequence")
+	assert isinstance(trigger_sequence, int)
+	assert isinstance(terminal_sequence, int)
+	if (
+		trigger_sequence > terminal_sequence
+		or parent_record.get("workflow_status") != "pending_human"
+		or str((parent_record.get("summary") or {}).get("new_approval_id") or "")
+		!= str(approval_row["approval_id"])
+	):
+		raise HumanApprovalStateError(
+			f"{trace_id}: child approval parent lineage is inconsistent"
+		)
+	approval_row["_parent_terminal_sequence"] = terminal_sequence
+
+
+def _review_handoff_is_in_approval_scope(
+	marker: dict[str, Any] | None,
+	*,
+	trace_id: str,
+	selected_approval_id: str,
+	origin_sequence: int,
+	terminal_marker: dict[str, Any] | None,
+) -> bool:
+	if marker is None or marker.get("type") != "human_approval":
+		return True
+	_validate_review_human_approval_marker(
+		marker,
+		trace_id=trace_id,
+		label="handoff",
+	)
+	marker_approval_id = str(marker.get("approval_id") or "")
+	sequence = marker.get("sequence")
+	assert isinstance(sequence, int)
+	if marker_approval_id == selected_approval_id:
+		# A terminal generation can resume from durable checkpoints written by
+		# earlier attempts (for example Policy/Refund on attempt 1 and Response
+		# on attempt 2). Keep every proved checkpoint at or before the terminal
+		# sequence; the global sort then selects the latest artifact per stage.
+		if terminal_marker is None:
+			return True
+		terminal_sequence = terminal_marker.get("sequence")
+		assert isinstance(terminal_sequence, int)
+		return sequence <= terminal_sequence
+	# Earlier human continuations are ancestry when they created this approval;
+	# later approvals are descendants and must never leak into its replay.
+	return sequence <= origin_sequence
+
+
+def _review_handoff_sort_key(row: dict[str, Any]) -> tuple[int, str, int, int, str]:
+	marker = _review_handoff_continuation_marker(row)
+	if marker is None:
+		return (0, str(row.get("created_at") or ""), 0, 0, str(row.get("handoff_id") or ""))
+	continuation_type = str(marker.get("type") or "")
+	if continuation_type == "human_approval":
+		sequence = marker.get("sequence")
+		attempt = marker.get("attempt")
+		if (
+			isinstance(sequence, bool)
+			or not isinstance(sequence, int)
+			or sequence < 1
+			or isinstance(attempt, bool)
+			or not isinstance(attempt, int)
+			or attempt < 1
+		):
+			raise HumanApprovalStateError("human-approval handoff marker is incomplete")
+		return (
+			sequence,
+			str(row.get("created_at") or ""),
+			2,
+			attempt,
+			str(row.get("handoff_id") or ""),
+		)
+	if continuation_type == "customer_followup":
+		return (
+			0,
+			str(row.get("created_at") or ""),
+			1,
+			0,
+			str(row.get("handoff_id") or ""),
+		)
+	raise HumanApprovalStateError(
+		f"unsupported handoff continuation marker: {continuation_type!r}"
+	)
+
+
+def _review_handoff_continuation_marker(
+	row: dict[str, Any],
+) -> dict[str, Any] | None:
+	input_marker = _json_object(row.get("input_json")).get("_continuation")
+	output_marker = _json_object(row.get("output_json")).get("_continuation")
+	if input_marker is None and output_marker is None:
+		return None
+	if not isinstance(input_marker, dict) or not isinstance(output_marker, dict):
+		raise HumanApprovalStateError(
+			"handoff continuation marker must appear as an object in both payloads"
+		)
+	if input_marker != output_marker:
+		raise HumanApprovalStateError("handoff continuation markers disagree")
+	return input_marker
+
+
+def _validate_review_human_approval_marker(
+	marker: dict[str, Any],
+	*,
+	expected_approval_id: str | None = None,
+	trace_id: str | None = None,
+	label: str,
+) -> None:
+	approval_id = str(marker.get("approval_id") or "").strip()
+	claim_token = str(marker.get("claim_token") or "").strip()
+	attempt = marker.get("attempt")
+	sequence = marker.get("sequence")
+	if (
+		marker.get("type") != "human_approval"
+		or not approval_id
+		or not claim_token
+		or isinstance(attempt, bool)
+		or not isinstance(attempt, int)
+		or attempt < 1
+		or isinstance(sequence, bool)
+		or not isinstance(sequence, int)
+		or sequence < 1
+	):
+		raise HumanApprovalStateError(f"{label} human-approval marker is incomplete")
+	if expected_approval_id is not None and approval_id != expected_approval_id:
+		raise HumanApprovalStateError(
+			f"{label} continuation marker belongs to a different approval"
+		)
+	if trace_id is not None and claim_token != _approval_continuation_claim_token(
+		trace_id,
+		approval_id,
+		attempt,
+	):
+		raise HumanApprovalStateError(
+			f"{label} continuation marker has an invalid claim token"
+		)
 
 
 def _review_trigger_stage(row: dict[str, Any]) -> str:
@@ -2519,11 +3222,17 @@ def _approval_continuation_claim(
 ) -> dict[str, Any] | None:
 	cursor.execute(
 		"""
-		SELECT log_id, payload_json, created_at,
-		       TIMESTAMPDIFF(SECOND, created_at, CURRENT_TIMESTAMP) AS age_seconds
-		FROM audit_log
-		WHERE trace_id = %s AND event_type = 'human_approval_continuation_claimed'
-		ORDER BY log_id DESC
+		SELECT audit.log_id, audit.payload_json, audit.created_at,
+		       TIMESTAMPDIFF(
+		         SECOND,
+		         GREATEST(audit.created_at, workflow.updated_at),
+		         CURRENT_TIMESTAMP
+		       ) AS age_seconds
+		FROM audit_log audit
+		JOIN workflow_runs workflow ON workflow.trace_id = audit.trace_id
+		WHERE audit.trace_id = %s
+		  AND audit.event_type = 'human_approval_continuation_claimed'
+		ORDER BY audit.log_id DESC
 		LIMIT 1
 		""",
 		(trace_id,),
@@ -2544,45 +3253,53 @@ def _approval_continuation_claim(
 	return {"log_id": row[0], "age_seconds": row[3], "payload": payload}
 
 
-def _upsert_approval_continuation_claim(
+def _append_approval_continuation_claim(
 	cursor: Any,
 	*,
 	trace_id: str,
 	approval_id: str,
 	next_agent: str,
 	existing_claim: dict[str, Any] | None,
-) -> None:
+) -> dict[str, Any]:
 	attempt = int(((existing_claim or {}).get("payload") or {}).get("attempt") or 0) + 1
+	claim_token = _approval_continuation_claim_token(trace_id, approval_id, attempt)
 	payload = json.dumps(
 		{
 			"approval_id": approval_id,
 			"next_agent": next_agent,
 			"attempt": attempt,
+			"claim_token": claim_token,
 		},
 		ensure_ascii=False,
 	)
-	if existing_claim is None:
-		cursor.execute(
-			"""
-			INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
-			VALUES (%s, 'human_approval_continuation_claimed', 'human_approval', %s)
-			""",
-			(trace_id, payload),
-		)
-		return
 	cursor.execute(
 		"""
-		UPDATE audit_log
-		SET payload_json = %s, created_at = CURRENT_TIMESTAMP
-		WHERE log_id = %s AND trace_id = %s
-		  AND event_type = 'human_approval_continuation_claimed'
+		INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
+		VALUES (%s, 'human_approval_continuation_claimed', 'human_approval', %s)
 		""",
-		(payload, existing_claim["log_id"], trace_id),
+		(trace_id, payload),
 	)
-	if cursor.rowcount != 1:
-		raise HumanApprovalConflictError(
-			f"{trace_id}: continuation claim changed while it was being refreshed"
+	claim = _approval_continuation_claim(
+		cursor,
+		trace_id=trace_id,
+		approval_id=approval_id,
+	)
+	if claim is None or (claim.get("payload") or {}).get("claim_token") != claim_token:
+		raise HumanApprovalConflictError(f"{trace_id}: continuation claim was not recorded")
+	return claim
+
+
+def _approval_continuation_claim_token(
+	trace_id: str,
+	approval_id: str,
+	attempt: int,
+) -> str:
+	return str(
+		uuid.uuid5(
+			uuid.NAMESPACE_URL,
+			f"idox-human-approval-continuation:{trace_id}:{approval_id}:{attempt}",
 		)
+	)
 
 
 def _approval_continuation_record(
@@ -2596,15 +3313,128 @@ def _approval_continuation_record(
 		SELECT payload_json FROM audit_log
 		WHERE trace_id = %s AND event_type = 'human_approval_continued'
 		ORDER BY log_id
+		FOR UPDATE
 		""",
 		(trace_id,),
 	)
+	matches: list[dict[str, Any]] = []
 	for row in cursor.fetchall():
 		payload_value = row.get("payload_json") if isinstance(row, dict) else row[0]
 		payload = _json_object(payload_value)
 		if payload.get("approval_id") == approval_id:
-			return payload
-	return None
+			matches.append(payload)
+	if len(matches) > 1:
+		raise HumanApprovalConflictError(
+			f"{trace_id}: multiple terminal records exist for one human approval"
+		)
+	return matches[0] if matches else None
+
+
+def _select_approval_governance_trigger(
+	cursor: Any,
+	*,
+	trace_id: str,
+	agent: str,
+	continuation_marker: dict[str, Any] | None,
+) -> str | None:
+	"""Select the exact blocked governance event that requested this review."""
+
+	cursor.execute(
+		"""
+		SELECT event_id, flags_json FROM governance_events
+		WHERE trace_id = %s AND agent = %s
+		  AND interceptor_action IN ('block', 'quarantine')
+		ORDER BY created_at DESC, event_id DESC
+		""",
+		(trace_id, agent),
+	)
+	rows = list(cursor.fetchall())
+	if continuation_marker is None:
+		if not rows:
+			return None
+		row = rows[0]
+		return str(row.get("event_id") if isinstance(row, dict) else row[0])
+	matches: list[str] = []
+	for row in rows:
+		event_id = row.get("event_id") if isinstance(row, dict) else row[0]
+		flags_value = row.get("flags_json") if isinstance(row, dict) else (
+			row[1] if len(row) > 1 else None
+		)
+		marker = _json_object(flags_value).get("_continuation")
+		if marker == continuation_marker:
+			matches.append(str(event_id))
+	if len(matches) > 1:
+		raise HumanApprovalConflictError(
+			f"{trace_id}: multiple governance triggers match one continuation"
+		)
+	if not matches:
+		raise HumanApprovalStateError(
+			f"{trace_id}: no governance trigger matches the active continuation"
+		)
+	return matches[0]
+
+
+def _validated_governance_trigger_marker(
+	cursor: Any,
+	*,
+	trace_id: str,
+	stage_agent: str,
+	active_marker: dict[str, Any] | None,
+	requested_marker: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+	"""Validate a prior durable stage marker used by stale recovery."""
+
+	if requested_marker is None:
+		return active_marker
+	if (
+		active_marker is None
+		or active_marker.get("type") != "human_approval"
+	):
+		raise HumanApprovalStateError(
+			f"{trace_id}: a prior governance trigger requires an active approval claim"
+		)
+	if not isinstance(requested_marker, dict):
+		raise HumanApprovalStateError(
+			f"{trace_id}: governance trigger continuation marker must be an object"
+		)
+	_validate_review_human_approval_marker(
+		requested_marker,
+		trace_id=trace_id,
+		label="governance trigger",
+	)
+	if (
+		requested_marker.get("approval_id") != active_marker.get("approval_id")
+		or int(requested_marker["sequence"]) > int(active_marker["sequence"])
+	):
+		raise HumanApprovalStateError(
+			f"{trace_id}: governance trigger is outside the active approval lineage"
+		)
+	cursor.execute(
+		"""
+		SELECT handoff_id, input_json, output_json
+		FROM agent_handoffs
+		WHERE trace_id = %s AND from_agent = %s AND to_agent = 'human_approval'
+		ORDER BY created_at, handoff_id
+		""",
+		(trace_id, stage_agent),
+	)
+	matches: list[str] = []
+	for row in cursor.fetchall():
+		if isinstance(row, dict):
+			handoff = row
+		else:
+			handoff = {
+				"handoff_id": row[0],
+				"input_json": row[1],
+				"output_json": row[2],
+			}
+		if _review_handoff_continuation_marker(handoff) == requested_marker:
+			matches.append(str(handoff.get("handoff_id") or ""))
+	if len(matches) != 1:
+		raise HumanApprovalStateError(
+			f"{trace_id}: governance trigger marker has no unique durable stage checkpoint"
+		)
+	return dict(requested_marker)
 
 
 def _workflow_state(output: PolicyAgentOutput) -> tuple[str, str]:

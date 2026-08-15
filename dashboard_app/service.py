@@ -115,13 +115,16 @@ def build_case_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
     ticket = _optional_mapping(bundle.get("ticket"))
     customer = _optional_mapping(bundle.get("customer"))
     handoffs = _mapping_list(bundle.get("handoffs"), "handoffs")
-    governance = _mapping_list(bundle.get("governance_events"), "governance_events")
+    governance_history = _mapping_list(bundle.get("governance_events"), "governance_events")
     approvals = _mapping_list(bundle.get("approvals"), "approvals")
-    refunds = _mapping_list(bundle.get("refunds"), "refunds")
+    refund_history = _mapping_list(bundle.get("refunds"), "refunds")
+    audit_history = _mapping_list(bundle.get("audit_log"), "audit_log")
 
     triage = _triage_payload(handoffs)
     policy = _policy_payload(handoffs)
     response = _response_payload(handoffs)
+    governance = _effective_governance_rows(governance_history, handoffs=handoffs)
+    refunds = _effective_refund_rows(refund_history, audit_rows=audit_history)
     request = _customer_request(ticket, triage, policy)
     decision = _decision_type(policy)
     final_outcome = _response_final_outcome(response)
@@ -168,6 +171,15 @@ def build_case_detail(bundle: Mapping[str, Any]) -> dict[str, Any]:
     triage = _triage_payload(handoffs)
     policy = _policy_payload(handoffs)
     response = _response_payload(handoffs)
+    effective_governance_rows = _effective_governance_rows(
+        governance_rows,
+        handoffs=handoffs,
+    )
+    effective_policy_reviews = _effective_policy_review_rows(
+        policy_reviews,
+        handoffs=handoffs,
+    )
+    effective_refunds = _effective_refund_rows(refunds, audit_rows=audit_rows)
     order = _order_section(orders, triage, policy)
     normalized_approvals = []
     for approval in approvals:
@@ -186,20 +198,43 @@ def build_case_detail(bundle: Mapping[str, Any]) -> dict[str, Any]:
     detail.update(
         {
             "order": order,
-            "policy": _policy_section(policy, policy_reviews),
+            "policy": _policy_section(policy, effective_policy_reviews),
             "customerResponse": _customer_response_section(response),
             "hasGaps": bool((_optional_mapping(policy.get("policy_evaluation"))).get("gaps_or_conflicts")),
-            "governance": _governance_section(policy, governance_rows),
-            "hasFlags": bool(_risk_tag(governance_rows)),
-            "pipeline": _pipeline(workflow, handoffs, governance_rows, approvals, refunds, policy),
-            "notes": [summarize_audit_row(row) for row in audit_rows],
-            "refund": _refund_section(refunds, summary["amount"]),
+            "governance": _governance_section(policy, effective_governance_rows),
+            "governanceEvents": [
+                normalize_governance_row(row)
+                for row in _ordered_governance_history(governance_rows)
+            ],
+            "hasFlags": bool(_risk_tag(effective_governance_rows)),
+            "pipeline": _pipeline(
+                workflow,
+                handoffs,
+                effective_governance_rows,
+                approvals,
+                effective_refunds,
+                policy,
+            ),
+            # The repository returns every immutable audit row.  Reorder the
+            # case timeline by durable continuation generation so the initial
+            # waiting-for-review response and the post-review response are
+            # both visible in their true lifecycle order, even when MySQL
+            # assigns them the same second-resolution timestamp.
+            "notes": _timeline_notes(audit_rows),
+            "refund": _refund_section(effective_refunds, summary["amount"]),
+            "refundTransactions": [
+                _serializable(row)
+                for row in _ordered_refund_history(refunds, audit_rows=audit_rows)
+            ],
             "pendingApprovalId": next(
                 (row.get("approval_id") for row in approvals if row.get("status") == "pending"),
                 None,
             ),
             "approvals": normalized_approvals,
-            "policyReviews": [_serializable(row) for row in policy_reviews],
+            "policyReviews": [
+                _normalize_policy_review_row(row)
+                for row in _ordered_policy_review_history(policy_reviews)
+            ],
             "policyVersion": workflow.get("policy_version") or "v1.0",
             "readOnly": True,
         }
@@ -292,8 +327,15 @@ def summarize_audit_row(raw: Mapping[str, Any]) -> dict[str, Any]:
             "category": category,
             "actor": _humanize(actor),
             "relativeTime": _relative_time(row.get("created_at")),
+            # CaseDetail's timeline uses the concise aliases while the audit
+            # page retains the richer summary/relativeTime contract.
+            "text": summary,
+            "time": _relative_time(row.get("created_at")),
         }
     )
+    marker = _audit_continuation_marker(raw, payload)
+    if marker is not None:
+        normalized["continuation"] = _serializable(marker)
     return normalized
 
 
@@ -301,6 +343,13 @@ def normalize_governance_row(raw: Mapping[str, Any]) -> dict[str, Any]:
     row = _serializable(dict(raw))
     flags = _json_object(raw.get("flags_json"), "governance_events.flags_json", allow_none=True)
     row["flags"] = _serializable(flags)
+    marker = _row_continuation_marker(
+        raw,
+        payload_fields=("flags_json",),
+        label="governance_events",
+    )
+    if marker is not None:
+        row["continuation"] = _serializable(marker)
     row["riskLabel"] = OWASP_LABELS.get(str(raw.get("owasp_category")), raw.get("owasp_category"))
     row["relativeTime"] = _relative_time(raw.get("created_at"))
     return row
@@ -606,7 +655,13 @@ def _pipeline(
 def _refund_section(refunds: list[dict[str, Any]], requested_amount: float) -> dict[str, Any] | None:
     if not refunds:
         return None
-    row = sorted(refunds, key=lambda item: str(item.get("created_at") or ""))[-1]
+    row = max(
+        refunds,
+        key=lambda item: (
+            _timestamp_sort_value(item.get("created_at")),
+            _primary_key_sort_value(item.get("transaction_id")),
+        ),
+    )
     return {
         "amount": _number(row.get("amount")),
         "status": row.get("status"),
@@ -615,6 +670,75 @@ def _refund_section(refunds: list[dict[str, Any]], requested_amount: float) -> d
         "transactionId": row.get("transaction_id"),
         "isPartial": bool(requested_amount and _number(row.get("amount")) < requested_amount),
     }
+
+
+def _effective_refund_rows(
+    rows: list[dict[str, Any]],
+    *,
+    audit_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    markers = _refund_marker_by_transaction(audit_rows)
+    return [max(rows, key=lambda row: _refund_sort_key(row, markers))]
+
+
+def _ordered_refund_history(
+    rows: list[dict[str, Any]],
+    *,
+    audit_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    markers = _refund_marker_by_transaction(audit_rows)
+    return sorted(rows, key=lambda row: _refund_sort_key(row, markers))
+
+
+def _refund_marker_by_transaction(
+    audit_rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any] | None]:
+    candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any] | None]]] = {}
+    for row in audit_rows:
+        if row.get("event_type") not in {
+            "refund_issued",
+            "refund_failed",
+            # Compatibility with the dashboard-v2 fixture vocabulary.
+            "refund_execution",
+        }:
+            continue
+        payload = _json_object(
+            row.get("payload_json"),
+            "audit_log.payload_json",
+            allow_none=True,
+        )
+        transaction_id = str(payload.get("transaction_id") or "").strip()
+        if not transaction_id:
+            continue
+        marker = _audit_continuation_marker(row, payload)
+        candidates.setdefault(transaction_id, []).append((row, marker))
+
+    result: dict[str, dict[str, Any] | None] = {}
+    for transaction_id, transaction_rows in candidates.items():
+        _, latest_marker = max(
+            transaction_rows,
+            key=lambda item: (
+                *_continuation_generation_key(item[1]),
+                _timestamp_sort_value(item[0].get("created_at")),
+                _primary_key_sort_value(item[0].get("log_id")),
+            ),
+        )
+        result[transaction_id] = latest_marker
+    return result
+
+
+def _refund_sort_key(
+    row: Mapping[str, Any],
+    markers: Mapping[str, Mapping[str, Any] | None],
+) -> tuple[int, int, int, float, tuple[int, int, str]]:
+    transaction_id = str(row.get("transaction_id") or "")
+    return (
+        *_continuation_generation_key(markers.get(transaction_id)),
+        _timestamp_sort_value(row.get("created_at")),
+        _primary_key_sort_value(transaction_id),
+    )
 
 
 def _triage_payload(handoffs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -663,32 +787,379 @@ def _latest_handoff(handoffs: list[dict[str, Any]], agent: str) -> dict[str, Any
     candidates = [row for row in handoffs if row.get("from_agent") == agent]
     if not candidates:
         return None
-    return sorted(
+    return max(
         candidates,
-        key=lambda row: (
-            str(row.get("created_at") or ""),
-            _handoff_continuation_rank(row),
-            str(row.get("handoff_id") or ""),
+        key=lambda row: _effective_row_sort_key(
+            row,
+            primary_key="handoff_id",
+            payload_fields=("input_json", "output_json"),
+            label="agent_handoffs",
         ),
-    )[-1]
+    )
 
 
-def _handoff_continuation_rank(row: Mapping[str, Any]) -> int:
-    """Prefer the resumed customer cycle when MySQL timestamps tie."""
+def _effective_governance_rows(
+    rows: list[dict[str, Any]],
+    *,
+    handoffs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the newest governance generation per agent without losing history.
 
-    for field in ("input_json", "output_json"):
+    ``build_case_detail`` separately exposes every row as ``governanceEvents``.
+    This selector is only for the current case projection.  Multiple findings
+    emitted by one continuation share the same marker, so all rows from the
+    winning marker generation are retained.
+    """
+
+    by_agent: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_agent.setdefault(str(row.get("agent") or ""), []).append(row)
+
+    effective: list[dict[str, Any]] = []
+    for agent, agent_rows in by_agent.items():
+        latest = max(
+            agent_rows,
+            key=lambda row: _effective_row_sort_key(
+                row,
+                primary_key="event_id",
+                payload_fields=("flags_json",),
+                label="governance_events",
+            ),
+        )
+        latest_marker = _row_continuation_marker(
+            latest,
+            payload_fields=("flags_json",),
+            label="governance_events",
+        )
+        latest_handoff = _latest_handoff(handoffs, agent)
+        if (
+            agent == "policy_agent"
+            and latest_handoff is not None
+            and _row_generation_key(
+                latest_handoff,
+                payload_fields=("input_json", "output_json"),
+                label="agent_handoffs",
+            )
+            > _continuation_generation_key(latest_marker)
+            and _policy_handoff_has_explicit_allow(latest_handoff)
+        ):
+            # Policy emits governance rows only for findings.  A newer marked
+            # Policy handoff with an explicit allow and no flags is therefore
+            # the durable allow generation; retaining an older blocked row as
+            # current would mis-project the completed retry.
+            continue
+        effective.extend(
+            row
+            for row in agent_rows
+            if _same_continuation_generation(
+                _row_continuation_marker(
+                    row,
+                    payload_fields=("flags_json",),
+                    label="governance_events",
+                ),
+                latest_marker,
+            )
+        )
+
+    return sorted(
+        effective,
+        key=lambda row: _effective_row_sort_key(
+            row,
+            primary_key="event_id",
+            payload_fields=("flags_json",),
+            label="governance_events",
+        ),
+    )
+
+
+def _effective_policy_review_rows(
+    rows: list[dict[str, Any]],
+    *,
+    handoffs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    latest = max(
+        rows,
+        key=lambda row: _effective_row_sort_key(
+            row,
+            primary_key="policy_review_event_id",
+            payload_fields=("evidence_json",),
+            label="policy_review_events",
+        ),
+    )
+    latest_marker = _row_continuation_marker(
+        latest,
+        payload_fields=("evidence_json",),
+        label="policy_review_events",
+    )
+    latest_policy_handoff = _latest_handoff(handoffs, "policy_agent")
+    if (
+        latest_policy_handoff is not None
+        and _row_generation_key(
+            latest_policy_handoff,
+            payload_fields=("input_json", "output_json"),
+            label="agent_handoffs",
+        )
+        > _continuation_generation_key(latest_marker)
+    ):
+        # A no-review Policy generation intentionally writes no review row.
+        # Historical rows remain available in policyReviews but do not feed
+        # the current Policy card.
+        return []
+    return [
+        row
+        for row in rows
+        if _same_continuation_generation(
+            _row_continuation_marker(
+                row,
+                payload_fields=("evidence_json",),
+                label="policy_review_events",
+            ),
+            latest_marker,
+        )
+    ]
+
+
+def _ordered_policy_review_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: _effective_row_sort_key(
+            row,
+            primary_key="policy_review_event_id",
+            payload_fields=("evidence_json",),
+            label="policy_review_events",
+        ),
+    )
+
+
+def _normalize_policy_review_row(raw: Mapping[str, Any]) -> dict[str, Any]:
+    row = _serializable(dict(raw))
+    evidence = _json_object(
+        raw.get("evidence_json"),
+        "policy_review_events.evidence_json",
+        allow_none=True,
+    )
+    row["evidence"] = _serializable(evidence)
+    marker = _row_continuation_marker(
+        raw,
+        payload_fields=("evidence_json",),
+        label="policy_review_events",
+    )
+    if marker is not None:
+        row["continuation"] = _serializable(marker)
+    return row
+
+
+def _policy_handoff_has_explicit_allow(row: Mapping[str, Any]) -> bool:
+    output = _json_object(
+        row.get("output_json"),
+        "policy_agent.output_json",
+        allow_none=True,
+    )
+    governance = _optional_mapping(output.get("governance"))
+    action = str(governance.get("interceptor_action") or "").lower()
+    return action == "allow" and not list(governance.get("flags") or [])
+
+
+def _ordered_governance_history(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda row: _effective_row_sort_key(
+            row,
+            primary_key="event_id",
+            payload_fields=("flags_json",),
+            label="governance_events",
+        ),
+    )
+
+
+def _timeline_notes(audit_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # audit_log.log_id is the immutable per-table lifecycle sequence.  Marker
+    # generations select *effective* artifacts, but cannot order full history:
+    # human_approval_resolved is intentionally unmarked and a child approval
+    # may be created after its parent's marked terminal event.
+    ordered = sorted(
+        audit_rows,
+        key=lambda row: (
+            _primary_key_sort_value(row.get("log_id")),
+            _timestamp_sort_value(row.get("created_at")),
+        ),
+    )
+    return [summarize_audit_row(row) for row in ordered]
+
+
+def _effective_row_sort_key(
+    row: Mapping[str, Any],
+    *,
+    primary_key: str,
+    payload_fields: tuple[str, ...],
+    label: str,
+    marker_override: Mapping[str, Any] | None = None,
+) -> tuple[int, int, int, float, tuple[int, int, str]]:
+    marker = (
+        dict(marker_override)
+        if marker_override is not None
+        else _row_continuation_marker(
+            row,
+            payload_fields=payload_fields,
+            label=label,
+        )
+    )
+    generation = _continuation_generation_key(marker)
+    return (
+        *generation,
+        _timestamp_sort_value(row.get("created_at")),
+        _primary_key_sort_value(row.get(primary_key)),
+    )
+
+
+def _row_generation_key(
+    row: Mapping[str, Any],
+    *,
+    payload_fields: tuple[str, ...],
+    label: str,
+) -> tuple[int, int, int]:
+    return _continuation_generation_key(
+        _row_continuation_marker(
+            row,
+            payload_fields=payload_fields,
+            label=label,
+        )
+    )
+
+
+def _row_continuation_marker(
+    row: Mapping[str, Any],
+    *,
+    payload_fields: tuple[str, ...],
+    label: str,
+) -> dict[str, Any] | None:
+    markers: list[dict[str, Any]] = []
+    for field in payload_fields:
         payload = _json_object(
             row.get(field),
-            f"agent_handoffs.{field}",
+            f"{label}.{field}",
             allow_none=True,
         )
-        continuation = payload.get("_continuation")
-        if (
-            isinstance(continuation, Mapping)
-            and continuation.get("type") == "customer_followup"
-        ):
-            return 1
-    return 0
+        marker = payload.get("_continuation")
+        if marker is None:
+            continue
+        if not isinstance(marker, Mapping):
+            raise DashboardDataError(f"{label}.{field}._continuation must be an object")
+        normalized = dict(marker)
+        _validate_continuation_marker(normalized, f"{label}.{field}._continuation")
+        markers.append(normalized)
+
+    if not markers:
+        return None
+    if any(marker != markers[0] for marker in markers[1:]):
+        raise DashboardDataError(f"{label} continuation markers disagree")
+    return markers[0]
+
+
+def _audit_continuation_marker(
+    row: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    marker = payload.get("_continuation")
+    if marker is not None:
+        if not isinstance(marker, Mapping):
+            raise DashboardDataError("audit_log.payload_json._continuation must be an object")
+        normalized = dict(marker)
+        _validate_continuation_marker(
+            normalized,
+            "audit_log.payload_json._continuation",
+        )
+        return normalized
+
+    # The claim row creates the global sequence and therefore cannot embed its
+    # own auto-increment id before insertion.  Reconstruct the same marker for
+    # timeline ordering from its immutable log id and claim payload.
+    if row.get("event_type") == "human_approval_continuation_claimed":
+        required = ("approval_id", "claim_token", "attempt")
+        if all(payload.get(field) not in (None, "") for field in required):
+            normalized = {
+                "type": "human_approval",
+                "approval_id": payload["approval_id"],
+                "claim_token": payload["claim_token"],
+                "attempt": payload["attempt"],
+                "sequence": row.get("log_id"),
+            }
+            _validate_continuation_marker(
+                normalized,
+                "audit_log human approval claim",
+            )
+            return normalized
+    return None
+
+
+def _validate_continuation_marker(marker: Mapping[str, Any], label: str) -> None:
+    continuation_type = marker.get("type")
+    if continuation_type not in {"customer_followup", "human_approval"}:
+        raise DashboardDataError(f"{label}.type is unsupported")
+    for field in ("sequence", "attempt"):
+        value = marker.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            raise DashboardDataError(f"{label}.{field} must be a positive integer")
+        try:
+            parsed = int(str(value))
+        except (TypeError, ValueError) as exc:
+            raise DashboardDataError(f"{label}.{field} must be a positive integer") from exc
+        if parsed <= 0 or str(parsed) != str(value).strip():
+            raise DashboardDataError(f"{label}.{field} must be a positive integer")
+
+
+def _continuation_generation_key(marker: Mapping[str, Any] | None) -> tuple[int, int, int]:
+    if marker is None:
+        return (0, 0, 0)
+    sequence = _marker_integer(marker, "sequence")
+    attempt = _marker_integer(marker, "attempt")
+    if sequence is not None:
+        # Explicit global sequences form the total order across continuation
+        # types.  Attempt orders retries of the same immutable claim sequence.
+        return (2, sequence, attempt or 0)
+    # Compatibility for customer-followup artifacts created before global
+    # sequence markers and for partially upgraded human-approval histories.
+    fallback = {"customer_followup": 1, "human_approval": 2}
+    return (1, fallback[str(marker.get("type"))], attempt or 0)
+
+
+def _marker_integer(marker: Mapping[str, Any], field: str) -> int | None:
+    value = marker.get(field)
+    return int(str(value)) if value is not None else None
+
+
+def _same_continuation_generation(
+    candidate: Mapping[str, Any] | None,
+    selected: Mapping[str, Any] | None,
+) -> bool:
+    if candidate is None or selected is None:
+        return candidate is None and selected is None
+    return dict(candidate) == dict(selected)
+
+
+def _timestamp_sort_value(value: Any) -> float:
+    parsed = _as_datetime(value)
+    if parsed is None:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _primary_key_sort_value(value: Any) -> tuple[int, int, str]:
+    if not isinstance(value, bool):
+        try:
+            numeric = int(str(value))
+        except (TypeError, ValueError):
+            pass
+        else:
+            if str(numeric) == str(value).strip():
+                return (1, numeric, "")
+    return (0, 0, str(value or ""))
 
 
 def _decision_type(policy: Mapping[str, Any]) -> str | None:
@@ -734,12 +1205,27 @@ def _audit_category(event_type: str, agent: str) -> str:
 
 
 def _audit_summary(event_type: str, payload: Mapping[str, Any]) -> str:
+    if event_type == "response_agent_evaluated":
+        output = _optional_mapping(payload.get("output"))
+        response = _optional_mapping(output.get("response_result")) or output
+        outcome = str(response.get("final_outcome") or "").lower()
+        marker = payload.get("_continuation")
+        if outcome == "manual_review":
+            return "Response recorded that the case is waiting for human review."
+        if isinstance(marker, Mapping) and marker.get("type") == "human_approval":
+            return "Final Response generated after human approval."
     known = {
         "triage_agent_evaluated": "Triage completed and persisted its handoff.",
         "policy_agent_evaluated": "Policy evaluated the request and persisted its decision.",
         "response_agent_evaluated": "Response generated and persisted the customer-facing result.",
         "refund_execution": "Refund execution completed.",
+        "refund_issued": "Refund execution issued the persisted refund.",
+        "refund_failed": "Refund execution failed closed; no refund was issued.",
         "governance_block": "Governance blocked the workflow for review.",
+        "human_approval_resolved": "A reviewer recorded the human-approval decision.",
+        "human_approval_continuation_claimed": "The reviewed workflow continuation was claimed.",
+        "human_approval_continued": "The reviewed workflow continuation completed.",
+        "human_approval_continuation_failed": "The reviewed workflow continuation failed closed.",
     }
     if event_type in known:
         return known[event_type]
