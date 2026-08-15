@@ -2174,7 +2174,7 @@ def _require_active_followup_claim(
 	trace_id: str,
 	claim_token: str | None,
 ) -> None:
-	"""Fence every continuation write against the newest durable lease."""
+	"""Fence every continuation write and heartbeat the newest durable lease."""
 
 	if claim_token is None:
 		return
@@ -2234,6 +2234,17 @@ def _require_active_followup_claim(
 	)
 	if cursor.fetchone() is not None:
 		raise CloudDatabaseError(f"{trace_id}: customer follow-up is already completed")
+	# Each fenced persistence transaction proves that the original worker is
+	# still making progress.  Refresh the leased claim in the same transaction
+	# so a graph whose total Azure latency exceeds the lease is not reclaimed
+	# between otherwise healthy stages.  A same-second no-op is valid: the
+	# selected row is locked and its age is already zero.
+	cursor.execute(
+		"UPDATE audit_log SET created_at = CURRENT_TIMESTAMP "
+		"WHERE trace_id = %s AND event_type = 'customer_followup_claimed' "
+		"ORDER BY log_id DESC LIMIT 1",
+		(trace_id,),
+	)
 
 
 def _validate_review_request(

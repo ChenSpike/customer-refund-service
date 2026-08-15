@@ -220,7 +220,18 @@ def _check_live_database() -> dict[str, Any]:
                 elif not received:
                     followup_status = "not_started"
                 elif row["status"] == "waiting_user":
-                    followup_status = "waiting_user"
+                    # A receipt already exists, so waiting_user here is a
+                    # restored handled failure rather than the first turn.
+                    followup_status = "retryable"
+                elif (
+                    row["status"] == "completed"
+                    and row["current_agent"] == "completed"
+                ):
+                    # All graph stages may commit immediately before the
+                    # process writes its terminal continuation receipt.  The
+                    # guarded endpoint can prove those rows and reconstruct
+                    # the receipt without calling Azure again.
+                    followup_status = "recoverable"
                 elif row["status"] == "failed":
                     followup_status = "retryable"
                 elif row["status"] == "running":

@@ -230,8 +230,11 @@ function renderFollowupControl() {
   const isCompleted = result?.follow_up?.status === "completed"
     || result?.follow_up?.status === "already_completed"
     || (persisted?.workflow_status === "completed"
-      && persisted?.current_agent === "completed");
-  const isRecoverable = persisted?.followup_status === "retryable";
+      && persisted?.current_agent === "completed"
+      && persisted?.followup_status === "completed");
+  const isReceiptRecoverable = persisted?.followup_status === "recoverable";
+  const isRecoverable = persisted?.followup_status === "retryable"
+    || isReceiptRecoverable;
   const isInProgress = persisted?.followup_status === "in_progress";
   const live = healthState?.mode === "live";
   byId("send-followup").disabled = batchRunning
@@ -239,20 +242,24 @@ function renderFollowupControl() {
     || !live;
   byId("send-followup").textContent = isCompleted
     ? "Replay exact follow-up"
-    : isRecoverable
-      ? "Retry/recover follow-up"
-      : "Continue customer → Triage";
+    : isReceiptRecoverable
+      ? "Recover completed follow-up"
+      : isRecoverable
+        ? "Retry/recover follow-up"
+        : "Continue customer → Triage";
   byId("followup-note").textContent = !live
     ? "A real continuation requires LIVE mode and GCP:final."
     : isCompleted
       ? "The continuation is complete; replay returns the immutable stored result without rerunning the graph."
-    : isRecoverable
-      ? "A prior continuation lease expired; retry safely restores the first cycle before resuming."
-      : isInProgress
-        ? `Continuation is in progress. Recovery unlocks automatically in ${persisted.followup_retry_after_seconds}s if it does not finish.`
-        : isWaiting
-          ? "The persisted workflow is waiting at Triage; this submits the canonical missing facts even after a page reload."
-          : "Run this case to its waiting_user state before continuing it.";
+      : isReceiptRecoverable
+        ? "The graph stages completed but the terminal receipt is missing; recover it from verified persisted history without rerunning Azure."
+        : isRecoverable
+          ? "A prior continuation lease expired; retry safely restores the first cycle before resuming."
+          : isInProgress
+            ? `Continuation is in progress. Recovery unlocks automatically in ${persisted.followup_retry_after_seconds}s if it does not finish.`
+            : isWaiting
+              ? "The persisted workflow is waiting at Triage; this submits the canonical missing facts even after a page reload."
+              : "Run this case to its waiting_user state before continuing it.";
 }
 
 async function loadHealth() {

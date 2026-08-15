@@ -149,29 +149,45 @@ class CustomerFollowupStore:
                 and workflow.get("current_agent") == "completed"
             ):
                 token = _claim_token(latest_claim, case.trace_id)
-                recovered, persistence = self._reconstruct_completed_result(
-                    cursor,
-                    case,
-                    receipt_payload,
-                    claim_token=token,
-                )
-                stored = self._insert_completion(
-                    cursor,
-                    case,
-                    request,
-                    recovered,
-                    persistence,
-                    claim_token=token,
-                    recovered=True,
-                    receipt_log_id=int(receipt["log_id"]),
-                )
-                connection.commit()
-                return CustomerFollowupClaim(
-                    receipt_log_id=int(receipt["log_id"]),
-                    assistant_response=_snapshot_assistant_response(receipt_payload),
-                    completed_result=stored,
-                    recovered=True,
-                )
+                try:
+                    recovered, persistence = self._reconstruct_completed_result(
+                        cursor,
+                        case,
+                        receipt_payload,
+                        claim_token=token,
+                    )
+                except CustomerFollowupConflictError:
+                    # Immutable receipt and canonical-root conflicts are never
+                    # made recoverable by the passage of time.
+                    raise
+                except CustomerFollowupStoreError as error:
+                    age_seconds = int(latest_claim.get("age_seconds") or 0)
+                    if age_seconds < self.lease_seconds:
+                        raise CustomerFollowupConflictError(
+                            f"{case.trace_id}: completed continuation proof is "
+                            "still within its active lease"
+                        ) from error
+                    # A crashed worker can leave a completed workflow whose
+                    # stage proof is incomplete. Once its heartbeat expires,
+                    # fall through to the normal snapshot restore/reclaim path.
+                else:
+                    stored = self._insert_completion(
+                        cursor,
+                        case,
+                        request,
+                        recovered,
+                        persistence,
+                        claim_token=token,
+                        recovered=True,
+                        receipt_log_id=int(receipt["log_id"]),
+                    )
+                    connection.commit()
+                    return CustomerFollowupClaim(
+                        receipt_log_id=int(receipt["log_id"]),
+                        assistant_response=_snapshot_assistant_response(receipt_payload),
+                        completed_result=stored,
+                        recovered=True,
+                    )
 
             if receipt is None:
                 if (
@@ -261,6 +277,35 @@ class CustomerFollowupStore:
                 claim_token=claim_token,
                 assistant_response=_snapshot_assistant_response(receipt_payload),
             )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            connection.close()
+
+    def heartbeat(self, case: DemoCase, claim_token: str) -> bool:
+        """Refresh an active graph lease; return false once the graph is terminal."""
+
+        connection = self.repository._connect()
+        cursor = None
+        try:
+            connection.start_transaction()
+            cursor = connection.cursor(dictionary=True)
+            workflow = self._workflow_identity(cursor, case, for_update=True)
+            self._require_current_token(cursor, case.trace_id, claim_token)
+            if workflow.get("status") != "running":
+                connection.commit()
+                return False
+            cursor.execute(
+                "UPDATE audit_log SET created_at = CURRENT_TIMESTAMP "
+                "WHERE trace_id = %s AND event_type = %s "
+                "ORDER BY log_id DESC LIMIT 1",
+                (case.trace_id, _CLAIMED),
+            )
+            connection.commit()
+            return True
         except Exception:
             connection.rollback()
             raise
@@ -374,16 +419,10 @@ class CustomerFollowupStore:
                     ),
                 ),
             )
-            cursor.execute(
-                "UPDATE workflow_runs SET status = 'waiting_user', current_agent = 'triage_agent', "
-                "completed_at = NULL, updated_at = CURRENT_TIMESTAMP "
-                "WHERE trace_id = %s AND ticket_id = %s",
-                (case.trace_id, case.ticket_id),
-            )
-            if cursor.rowcount != 1:
-                raise CustomerFollowupStoreError(
-                    f"{case.trace_id}: could not mark failed continuation"
-                )
+            # _restore_snapshot already moved this exact workflow back to
+            # waiting_user and verified that row. Repeating the same UPDATE in
+            # the same second can correctly produce MySQL affected-rowcount 0,
+            # which used to roll back both the restoration and failure marker.
             connection.commit()
         except Exception:
             connection.rollback()
@@ -489,8 +528,20 @@ class CustomerFollowupStore:
                 case.ticket_id,
             ),
         )
-        if cursor.rowcount != 1:
-            raise CustomerFollowupStoreError(f"{case.trace_id}: snapshot workflow is missing")
+        # mysql.connector exposes affected-row count. A legitimate restore of
+        # an already restored retry therefore reports 0, just like the live
+        # same-second failure path. Verify the locked identity and values
+        # instead of treating a no-op as a missing workflow.
+        restored = self._workflow_identity(cursor, case, for_update=True)
+        expected_policy_version = (history.get("workflow") or {}).get("policy_version")
+        if (
+            restored.get("status") != "waiting_user"
+            or restored.get("current_agent") != "triage_agent"
+            or restored.get("policy_version") != expected_policy_version
+        ):
+            raise CustomerFollowupStoreError(
+                f"{case.trace_id}: snapshot workflow was not restored"
+            )
 
     def _reconstruct_completed_result(
         self,
@@ -933,7 +984,7 @@ class CustomerFollowupStore:
             cursor.execute(f"SELECT {column} FROM {table} ORDER BY {column}")
             actual = tuple(str(row[column]) for row in cursor.fetchall())
             if actual != identifiers:
-                raise CustomerFollowupStoreError(
+                raise CustomerFollowupConflictError(
                     f"final.{table} must contain exactly the canonical 20 roots"
                 )
             counts[table] = len(actual)

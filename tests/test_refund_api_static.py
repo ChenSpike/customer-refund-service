@@ -29,7 +29,10 @@ def test_static_ui_loads_exact_case_catalog_and_posts_only_case_id() -> None:
     assert "healthState?.case_states?.[item.case_id]" in source
     assert "even after a page reload" in source
     assert 'persisted?.followup_status === "retryable"' in source
+    assert 'persisted?.followup_status === "recoverable"' in source
     assert "Retry/recover follow-up" in source
+    assert "Recover completed follow-up" in source
+    assert "without rerunning Azure" in source
     assert "Recovery unlocks automatically" in source
 
 

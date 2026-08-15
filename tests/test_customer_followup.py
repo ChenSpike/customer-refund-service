@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from copy import deepcopy
 from types import SimpleNamespace
@@ -80,6 +81,7 @@ class _Graph:
 class _ServiceStore:
     def __init__(self, claim: CustomerFollowupClaim | None = None) -> None:
         self.repository = object()
+        self.lease_seconds = 30
         self.claim_result = claim or CustomerFollowupClaim(
             receipt_log_id=41,
             claim_token="claim-token-1",
@@ -103,6 +105,9 @@ class _ServiceStore:
 
     def fail(self, case, error, claim_token):
         self.failed.append((case.trace_id, error, claim_token))
+
+    def heartbeat(self, _case, _claim_token):
+        return True
 
 
 def test_service_resumes_same_roots_through_trusted_triage_context() -> None:
@@ -170,6 +175,35 @@ def test_unexpected_continuation_fails_closed() -> None:
 
     assert len(store.failed) == 1
     assert store.completed == []
+
+
+def test_service_heartbeats_claim_while_graph_is_waiting() -> None:
+    heartbeat_seen = threading.Event()
+
+    class HeartbeatStore(_ServiceStore):
+        lease_seconds = 0.03
+
+        def __init__(self):
+            super().__init__()
+            self.lease_seconds = 0.03
+
+        def heartbeat(self, case, claim_token):
+            assert case.trace_id == "demo10"
+            assert claim_token == "claim-token-1"
+            heartbeat_seen.set()
+            return True
+
+    class WaitingGraph:
+        def invoke(self, _value):
+            assert heartbeat_seen.wait(timeout=1)
+            return _graph_state()
+
+    result = CustomerFollowupService(
+        HeartbeatStore(), graph=WaitingGraph()
+    ).run(load_demo_catalog().get("demo10"))
+
+    assert result["matched_expectations"] is True
+    assert heartbeat_seen.is_set()
 
 
 class _MemoryDatabase:
@@ -454,10 +488,24 @@ class _MemoryCursor:
                 self.db.workflow.update(status="running", current_agent="triage_agent")
                 self.rowcount = 1
         elif sql.startswith("UPDATE workflow_runs SET status = 'waiting_user'"):
+            changed = (
+                self.db.workflow["status"] != "waiting_user"
+                or self.db.workflow["current_agent"] != "triage_agent"
+            )
             self.db.workflow.update(status="waiting_user", current_agent="triage_agent")
             if "policy_version = %s" in sql:
+                changed = changed or self.db.workflow.get("policy_version") != params[0]
                 self.db.workflow["policy_version"] = params[0]
-            self.rowcount = 1
+            # mysql.connector reports affected rows, not matched rows. A
+            # repeated same-value update in the same timestamp second is 0.
+            self.rowcount = int(changed)
+        elif sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP"):
+            # Lease heartbeat. A same-second refresh may legitimately affect 0
+            # rows, and production code intentionally does not reject that.
+            claim = self.db.latest_event("customer_followup_claimed")
+            if claim is not None:
+                self.db.claim_ages[claim["log_id"]] = 0
+            self.rowcount = 0
         elif sql.startswith("UPDATE workflow_runs SET status = 'failed'"):
             self.db.workflow.update(status="failed", current_agent="triage_agent")
             self.rowcount = 1
@@ -562,6 +610,50 @@ def test_stale_claim_restores_partial_attempt_then_reclaims_with_new_fence() -> 
     assert database.workflow["status"] == "running"
 
 
+def test_stale_completed_invalid_proof_restores_and_reclaims() -> None:
+    database, store = _store_fixture()
+    first = store.claim(database.case)
+    database.install_completed_attempt()
+    initial_policy = next(
+        row
+        for row in database.tables["agent_handoffs"]
+        if row["handoff_id"] == "policy-0"
+    )
+    initial_policy["to_agent"] = "refund_agent"
+
+    with pytest.raises(CustomerFollowupConflictError, match="active lease"):
+        store.claim(database.case)
+
+    claim_row = database.latest_event("customer_followup_claimed")
+    database.claim_ages[claim_row["log_id"]] = 31
+    second = store.claim(database.case)
+
+    assert second.claim_token != first.claim_token
+    assert database.workflow["status"] == "running"
+    assert database.tables["refund_transactions"] == []
+    assert {
+        row["handoff_id"] for row in database.tables["agent_handoffs"]
+    } == {
+        "triage-0",
+        "policy-0",
+        "response-0",
+        str(uuid.uuid5(uuid.NAMESPACE_URL, "idox-handoff:demo10:customer_followup")),
+    }
+
+
+def test_store_heartbeat_resets_claim_age_and_stops_at_terminal_workflow() -> None:
+    database, store = _store_fixture()
+    claim = store.claim(database.case)
+    claim_row = database.latest_event("customer_followup_claimed")
+    database.claim_ages[claim_row["log_id"]] = 29
+
+    assert store.heartbeat(database.case, claim.claim_token) is True
+    assert database.claim_ages[claim_row["log_id"]] == 0
+
+    database.workflow.update(status="completed", current_agent="completed")
+    assert store.heartbeat(database.case, claim.claim_token) is False
+
+
 def test_handled_failure_restores_history_and_allows_immediate_retry() -> None:
     database, store = _store_fixture()
     first = store.claim(database.case)
@@ -580,6 +672,49 @@ def test_handled_failure_restores_history_and_allows_immediate_retry() -> None:
     second = store.claim(database.case)
     assert second.claim_token != first.claim_token
     assert database.workflow["status"] == "running"
+
+
+def test_service_restores_completed_graph_when_terminal_proof_fails() -> None:
+    """Model the live failure: all stages committed but Policy mutated history."""
+
+    database, store = _store_fixture()
+
+    class CompletionProofFailureGraph:
+        def invoke(self, _value: dict) -> dict:
+            database.install_completed_attempt()
+            initial_policy = next(
+                row
+                for row in database.tables["agent_handoffs"]
+                if row["handoff_id"] == "policy-0"
+            )
+            initial_policy["to_agent"] = "refund_agent"
+            return _graph_state()
+
+    with pytest.raises(
+        CustomerFollowupExecutionError,
+        match="customer follow-up continuation failed",
+    ):
+        CustomerFollowupService(store, graph=CompletionProofFailureGraph()).run(
+            database.case
+        )
+
+    assert database.workflow["status"] == "waiting_user"
+    assert database.workflow["current_agent"] == "triage_agent"
+    failure = json.loads(
+        database.latest_event("customer_followup_failed")["payload_json"]
+    )
+    assert failure["error_type"] == "CustomerFollowupStoreError"
+    assert failure["history_restored"] is True
+    assert database.latest_event("customer_followup_completed") is None
+    assert database.tables["refund_transactions"] == []
+    assert {
+        row["handoff_id"] for row in database.tables["agent_handoffs"]
+    } == {
+        "triage-0",
+        "policy-0",
+        "response-0",
+        str(uuid.uuid5(uuid.NAMESPACE_URL, "idox-handoff:demo10:customer_followup")),
+    }
 
 
 def test_failed_claim_token_cannot_resurrect_store_or_database_stages() -> None:
@@ -759,6 +894,10 @@ def test_repository_appends_marked_stage_and_governance_rows_and_fences_stale_to
     )
     stage_audit = database.latest_event("triage_agent_evaluated")
     assert json.loads(stage_audit["payload_json"])["_continuation"] == expected_marker
+    assert sum(
+        sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP")
+        for sql, _ in database.statements[statement_index:]
+    ) == 1
 
     newer_token = "newer-followup-token"
     database.tables["audit_log"].append(database._audit(
@@ -801,6 +940,10 @@ def test_repository_appends_marked_stage_and_governance_rows_and_fences_stale_to
         "type": "customer_followup",
         "claim_token": newer_token,
     }
+    assert sum(
+        sql.startswith("UPDATE audit_log SET created_at = CURRENT_TIMESTAMP")
+        for sql, _ in database.statements[statement_index:]
+    ) == 2
 
 
 def test_governance_context_rejects_cross_trace_write() -> None:

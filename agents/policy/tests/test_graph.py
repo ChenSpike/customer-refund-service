@@ -34,8 +34,8 @@ class RecordingRepository:
     def __init__(self) -> None:
         self.calls = []
 
-    def persist_result(self, *args):
-        self.calls.append(args)
+    def persist_result(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return "POLICY-HANDOFF-1"
 
 
@@ -68,6 +68,26 @@ def test_policy_subgraph_has_persistence_order_and_json_state() -> None:
     assert len(repository.calls) == 1
     assert output.decision == policy_result.decision
     assert output.handoff.next_agent == "refund_agent"
+
+
+def test_policy_subgraph_preserves_customer_followup_fence_at_input_boundary() -> None:
+    policy_input = make_input()
+    client = FakeAzureClient(make_policy_result(policy_input), allow_governance())
+    repository = RecordingRepository()
+    graph = build_policy_agent_graph(client, store=PipelineStore(repository))
+    state = _state(policy_input)
+    state["request_context"] = {
+        "continuation_type": "customer_followup",
+        "followup_claim_token": "claim-token-live-shape",
+    }
+
+    result = graph.invoke(state)
+
+    assert result["request_context"] == state["request_context"]
+    assert len(repository.calls) == 1
+    assert repository.calls[0][1] == {
+        "followup_claim_token": "claim-token-live-shape"
+    }
 
 
 def test_proposal_output_and_extended_decision_keep_exact_order() -> None:

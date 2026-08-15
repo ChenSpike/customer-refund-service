@@ -204,16 +204,24 @@ def test_live_health_verifies_selected_final_database_and_closes_resources(monke
 
 
 @pytest.mark.parametrize(
-    ("workflow_status", "claim_age_seconds", "expected_status", "expected_retry"),
+    (
+        "workflow_status",
+        "current_agent",
+        "claim_age_seconds",
+        "expected_status",
+        "expected_retry",
+    ),
     [
-        ("waiting_user", 0, "waiting_user", None),
-        ("running", 5, "in_progress", 25),
-        ("running", 31, "retryable", 0),
+        ("waiting_user", "triage_agent", 0, "retryable", None),
+        ("running", "triage_agent", 5, "in_progress", 25),
+        ("running", "triage_agent", 31, "retryable", 0),
+        ("completed", "completed", 31, "recoverable", None),
     ],
 )
 def test_live_health_exposes_followup_recovery_state_after_page_reload(
     monkeypatch,
     workflow_status: str,
+    current_agent: str,
     claim_age_seconds: int,
     expected_status: str,
     expected_retry: int | None,
@@ -228,6 +236,7 @@ def test_live_health_exposes_followup_recovery_state_after_page_reload(
     demo10.update(
         {
             "status": workflow_status,
+            "current_agent": current_agent,
             "audits": 1,
             "followup_received": 1,
             "followup_completed": 0,
@@ -243,7 +252,7 @@ def test_live_health_exposes_followup_recovery_state_after_page_reload(
     state = response.json()["case_states"]["demo10"]
     assert state == {
         "workflow_status": workflow_status,
-        "current_agent": "triage_agent",
+        "current_agent": current_agent,
         "followup_status": expected_status,
         "followup_retry_after_seconds": expected_retry,
     }

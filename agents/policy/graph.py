@@ -17,6 +17,11 @@ class PolicyGraphInput(TypedDict):
     trace_id: str
     ticket_id: str
     triage_output: dict[str, Any]
+    # LangGraph filters parent state through this input schema before entering
+    # the subgraph.  The continuation fence therefore has to be declared here,
+    # not only on AppState, or Policy persistence silently becomes an ordinary
+    # rerun and can overwrite the initial Policy handoff.
+    request_context: dict[str, Any]
 
 
 def policy_handoff_node(state: AppState) -> dict:

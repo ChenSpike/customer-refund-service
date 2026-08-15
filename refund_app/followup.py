@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from copy import deepcopy
+from threading import Event, Thread
 from typing import Any
 
 from db.followup_context import followup_fence
@@ -68,6 +69,7 @@ class CustomerFollowupService:
             with (
                 _scoped_environment("POLICY_EVALUATION_DATE", case.evaluation_date),
                 followup_fence(case.trace_id, claim.claim_token),
+                _ClaimLeaseHeartbeat(self.store, case, claim.claim_token),
             ):
                 state = self._live_graph().invoke(graph_input)
             workflow_ms = _milliseconds(self.clock() - workflow_started)
@@ -211,6 +213,45 @@ def normalize_followup_state(case: DemoCase, state: dict[str, Any]) -> dict[str,
 
 def _milliseconds(seconds: float) -> float:
     return round(seconds * 1000, 3)
+
+
+class _ClaimLeaseHeartbeat:
+    """Keep a claimed graph active while Azure calls are between DB stages."""
+
+    def __init__(self, store: CustomerFollowupStore, case: DemoCase, token: str) -> None:
+        self.store = store
+        self.case = case
+        self.token = token
+        lease_seconds = float(getattr(store, "lease_seconds", 30))
+        self.interval = max(0.01, min(10.0, lease_seconds / 3))
+        self.stop_event = Event()
+        self.error: Exception | None = None
+        self.thread = Thread(
+            target=self._run,
+            name=f"followup-heartbeat-{case.trace_id}",
+            daemon=True,
+        )
+
+    def __enter__(self) -> "_ClaimLeaseHeartbeat":
+        self.thread.start()
+        return self
+
+    def __exit__(self, error_type: Any, _error: Any, _traceback: Any) -> None:
+        self.stop_event.set()
+        self.thread.join()
+        if error_type is None and self.error is not None:
+            raise CustomerFollowupExecutionError(
+                f"{self.case.trace_id}: continuation lease heartbeat failed"
+            ) from self.error
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(self.interval):
+            try:
+                if not self.store.heartbeat(self.case, self.token):
+                    return
+            except Exception as error:  # pragma: no cover - asserted at context exit
+                self.error = error
+                return
 
 
 __all__ = [
