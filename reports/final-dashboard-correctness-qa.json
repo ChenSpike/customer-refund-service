@@ -103,7 +103,7 @@
     }
   ],
   "local_validation": {
-    "pytest": "532 passed, 3 deselected",
+    "pytest": "532 passed, 3 skipped, 1 existing warning",
     "frontend_production_build": "compiled successfully",
     "python_compileall": "passed",
     "git_diff_check": "passed"
