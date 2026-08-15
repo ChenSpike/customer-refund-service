@@ -16,6 +16,27 @@ function amountIsValid(value) {
   return /^\d+(?:\.\d{1,2})?$/.test(value) && Number(value) > 0;
 }
 
+function numericAmount(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function amountSuggestion(decision, requested, remaining) {
+  if (!['approve', 'partial_refund'].includes(decision) || remaining <= 0) return '';
+  const ceiling = Math.min(remaining, requested > 0 ? requested : remaining);
+  // When the refundable balance is already below the requested amount, that
+  // balance is the natural partial-refund suggestion (demo07/demo08). Only
+  // split the request when a reviewer deliberately chooses a partial refund
+  // despite the full requested amount still being refundable.
+  const candidate = decision === 'partial_refund' && ceiling >= requested
+    ? ceiling / 2
+    : ceiling;
+  const cents = Math.floor((candidate + Number.EPSILON) * 100) / 100;
+  return cents > 0 && (decision !== 'partial_refund' || cents < requested)
+    ? cents.toFixed(2)
+    : '';
+}
+
 export default function ApprovalResolutionForm({
   traceId,
   approval,
@@ -33,10 +54,24 @@ export default function ApprovalResolutionForm({
   const approvalId = approval?.approval_id;
   const refundRoute = approval?.approved_next_agent === 'refund_agent';
   const amountRequired = decision === 'partial_refund' || (decision === 'approve' && refundRoute);
-  const eligibleAmount = useMemo(
-    () => approval?.amount_requested ?? requestedAmount ?? null,
-    [approval?.amount_requested, requestedAmount]
-  );
+  const financials = useMemo(() => {
+    const paid = numericAmount(approval?.amount_paid);
+    const prior = numericAmount(approval?.prior_refund_total);
+    const remaining = numericAmount(
+      approval?.remaining_refundable,
+      Math.max(0, paid - prior)
+    );
+    return {
+      requested: numericAmount(
+        approval?.requested_amount ?? approval?.amount_requested ?? requestedAmount,
+        remaining
+      ),
+      paid,
+      prior,
+      remaining,
+      currency: approval?.currency || 'USD',
+    };
+  }, [approval, requestedAmount]);
   const supportedTrace = DEMO_TRACE.test(traceId || '');
 
   const changeDecision = (event) => {
@@ -46,6 +81,8 @@ export default function ApprovalResolutionForm({
     setResult(null);
     if (next === 'deny' || (next === 'approve' && !refundRoute)) {
       setResolvedAmount('');
+    } else if (refundRoute) {
+      setResolvedAmount(amountSuggestion(next, financials.requested, financials.remaining));
     }
   };
 
@@ -76,6 +113,30 @@ export default function ApprovalResolutionForm({
     }
     if (amountRequired && !amountIsValid(resolvedAmount)) {
       setError('Enter a positive refund amount with at most two decimal places.');
+      return;
+    }
+    if (amountRequired && Number(resolvedAmount) > financials.remaining) {
+      setError(
+        `Refund amount cannot exceed the ${financials.currency} $${money(financials.remaining)} remaining refundable balance.`
+      );
+      return;
+    }
+    if (
+      amountRequired
+      && financials.requested > 0
+      && Number(resolvedAmount) > financials.requested
+    ) {
+      setError(
+        `Refund amount cannot exceed the ${financials.currency} $${money(financials.requested)} requested amount.`
+      );
+      return;
+    }
+    if (
+      decision === 'partial_refund'
+      && financials.requested > 0
+      && Number(resolvedAmount) >= financials.requested
+    ) {
+      setError('Partial refund must be less than the requested amount.');
       return;
     }
 
@@ -118,6 +179,13 @@ export default function ApprovalResolutionForm({
 
   return (
     <form onSubmit={submit} style={{ marginTop: 16 }}>
+      <div style={financialGridStyle} aria-label={`Refund limits for ${traceId}`}>
+        <FinancialFact label="Requested" value={financials.requested} currency={financials.currency} />
+        <FinancialFact label="Paid" value={financials.paid} currency={financials.currency} />
+        <FinancialFact label="Prior refunds" value={financials.prior} currency={financials.currency} />
+        <FinancialFact label="Remaining refundable" value={financials.remaining} currency={financials.currency} emphasis />
+      </div>
+
       <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 5 }}>Decision</div>
       <select
         value={decision}
@@ -135,8 +203,9 @@ export default function ApprovalResolutionForm({
       {amountRequired && (
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 11, color: colors.textFaint, marginBottom: 5 }}>
-            Resolved refund amount
-            {eligibleAmount != null && <> · requested ${money(eligibleAmount)}</>}
+            Resolved refund amount · maximum {financials.currency} ${money(
+              Math.min(financials.requested || financials.remaining, financials.remaining)
+            )}
           </div>
           <input
             type="text"
@@ -212,6 +281,23 @@ export default function ApprovalResolutionForm({
   );
 }
 
+function FinancialFact({ label, value, currency, emphasis }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: colors.textFaint }}>{label}</div>
+      <div style={{
+        marginTop: 3,
+        fontFamily: 'ui-monospace,monospace',
+        fontSize: 12,
+        fontWeight: emphasis ? 700 : 500,
+        color: emphasis ? colors.accentText : colors.text,
+      }}>
+        {currency} ${money(value)}
+      </div>
+    </div>
+  );
+}
+
 const inputStyle = {
   boxSizing: 'border-box',
   width: '100%',
@@ -222,6 +308,17 @@ const inputStyle = {
   color: colors.text,
   font: 'inherit',
   fontSize: 12.5,
+};
+
+const financialGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 10,
+  marginBottom: 14,
+  padding: 12,
+  border: `1px solid ${colors.borderFaint}`,
+  borderRadius: 8,
+  background: 'oklch(0.985 0.004 90)',
 };
 
 const noticeStyle = {

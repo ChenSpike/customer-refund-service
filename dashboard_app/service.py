@@ -156,6 +156,7 @@ def build_case_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
 def build_case_detail(bundle: Mapping[str, Any]) -> dict[str, Any]:
     summary = build_case_summary(bundle)
     workflow = _mapping(bundle.get("workflow"), "workflow")
+    ticket = _optional_mapping(bundle.get("ticket"))
     handoffs = _mapping_list(bundle.get("handoffs"), "handoffs")
     governance_rows = _mapping_list(bundle.get("governance_events"), "governance_events")
     approvals = _mapping_list(bundle.get("approvals"), "approvals")
@@ -166,11 +167,27 @@ def build_case_detail(bundle: Mapping[str, Any]) -> dict[str, Any]:
 
     triage = _triage_payload(handoffs)
     policy = _policy_payload(handoffs)
+    response = _response_payload(handoffs)
+    order = _order_section(orders, triage, policy)
+    normalized_approvals = []
+    for approval in approvals:
+        approval_with_financials = {
+            **approval,
+            "ticket_requested_amount": ticket.get("requested_amount")
+            if ticket.get("requested_amount") is not None
+            else summary["request"]["requestedAmount"],
+            "ticket_currency": ticket.get("currency") or summary["currency"],
+            "order_amount_paid": order.get("amountPaid"),
+            "order_prior_refund_total": order.get("priorRefundTotal"),
+            "order_currency": summary["currency"],
+        }
+        normalized_approvals.append(normalize_approval_row(approval_with_financials))
     detail = dict(summary)
     detail.update(
         {
-            "order": _order_section(orders, triage, policy),
+            "order": order,
             "policy": _policy_section(policy, policy_reviews),
+            "customerResponse": _customer_response_section(response),
             "hasGaps": bool((_optional_mapping(policy.get("policy_evaluation"))).get("gaps_or_conflicts")),
             "governance": _governance_section(policy, governance_rows),
             "hasFlags": bool(_risk_tag(governance_rows)),
@@ -181,7 +198,7 @@ def build_case_detail(bundle: Mapping[str, Any]) -> dict[str, Any]:
                 (row.get("approval_id") for row in approvals if row.get("status") == "pending"),
                 None,
             ),
-            "approvals": [normalize_approval_row(row) for row in approvals],
+            "approvals": normalized_approvals,
             "policyReviews": [_serializable(row) for row in policy_reviews],
             "policyVersion": workflow.get("policy_version") or "v1.0",
             "readOnly": True,
@@ -291,6 +308,39 @@ def normalize_governance_row(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 def normalize_approval_row(raw: Mapping[str, Any]) -> dict[str, Any]:
     row = _serializable(dict(raw))
+    amount_paid = _number(raw.get("order_amount_paid"))
+    prior_refund_total = _number(raw.get("order_prior_refund_total"))
+    remaining_refundable = round(max(0.0, amount_paid - prior_refund_total), 2)
+    requested_source = next(
+        (
+            value
+            for value in (
+                raw.get("amount_requested"),
+                raw.get("ticket_requested_amount"),
+                remaining_refundable,
+                amount_paid,
+            )
+            if value is not None and value != ""
+        ),
+        0,
+    )
+    row.update(
+        {
+            "requested_amount": _number(requested_source),
+            "amount_paid": amount_paid,
+            "prior_refund_total": prior_refund_total,
+            "remaining_refundable": remaining_refundable,
+            "currency": raw.get("ticket_currency") or raw.get("order_currency") or "USD",
+        }
+    )
+    for internal_name in (
+        "ticket_requested_amount",
+        "ticket_currency",
+        "order_amount_paid",
+        "order_prior_refund_total",
+        "order_currency",
+    ):
+        row.pop(internal_name, None)
     row["notesPayload"] = _notes_payload(raw.get("notes"))
     row["policyIds"] = _json_value(raw.get("policy_ids_json"), "policy_review_events.policy_ids_json", allow_none=True) or []
     trigger_type = raw.get("triggering_event_type")
@@ -590,11 +640,55 @@ def _response_payload(handoffs: list[dict[str, Any]]) -> dict[str, Any]:
     return _mapping(nested, "response_result") if nested is not None else envelope
 
 
+def _customer_response_section(response: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Expose the persisted customer message and its fail-closed checks."""
+
+    message = _optional_mapping(response.get("response"))
+    checks = _optional_mapping(response.get("content_checks"))
+    if not message and not checks and not response.get("final_outcome"):
+        return None
+    return {
+        "channel": message.get("channel"),
+        "subjectLine": message.get("subject_line"),
+        "body": message.get("body"),
+        "tone": message.get("tone"),
+        "wordCount": message.get("word_count"),
+        "finalOutcome": response.get("final_outcome"),
+        "workflowStatus": response.get("workflow_status"),
+        "contentChecks": _serializable(checks),
+    }
+
+
 def _latest_handoff(handoffs: list[dict[str, Any]], agent: str) -> dict[str, Any] | None:
     candidates = [row for row in handoffs if row.get("from_agent") == agent]
     if not candidates:
         return None
-    return sorted(candidates, key=lambda row: str(row.get("created_at") or row.get("handoff_id") or ""))[-1]
+    return sorted(
+        candidates,
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            _handoff_continuation_rank(row),
+            str(row.get("handoff_id") or ""),
+        ),
+    )[-1]
+
+
+def _handoff_continuation_rank(row: Mapping[str, Any]) -> int:
+    """Prefer the resumed customer cycle when MySQL timestamps tie."""
+
+    for field in ("input_json", "output_json"):
+        payload = _json_object(
+            row.get(field),
+            f"agent_handoffs.{field}",
+            allow_none=True,
+        )
+        continuation = payload.get("_continuation")
+        if (
+            isinstance(continuation, Mapping)
+            and continuation.get("type") == "customer_followup"
+        ):
+            return 1
+    return 0
 
 
 def _decision_type(policy: Mapping[str, Any]) -> str | None:

@@ -14,12 +14,31 @@ class _HealthCursor:
     def __init__(self, selected_database: str | None) -> None:
         self.selected_database = selected_database
         self.closed = False
+        self.statement = ""
 
     def execute(self, statement: str) -> None:
-        assert statement == "SELECT DATABASE() AS database_name"
+        self.statement = " ".join(statement.split())
 
     def fetchone(self):
+        assert self.statement == "SELECT DATABASE() AS database_name"
         return {"database_name": self.selected_database}
+
+    def fetchall(self):
+        assert "FROM workflow_runs workflow" in self.statement
+        return [
+            {
+                "trace_id": case_id,
+                "status": "running",
+                "current_agent": "triage_agent",
+                "handoffs": 0,
+                "audits": 0,
+                "governance_events": 0,
+                "policy_reviews": 0,
+                "approvals": 0,
+                "refunds": 0,
+            }
+            for case_id in DEMO_IDS
+        ]
 
     def close(self) -> None:
         self.closed = True
@@ -64,6 +83,7 @@ def _install_health_repository(monkeypatch, repository: _HealthRepository) -> No
         "from_env",
         classmethod(lambda _cls: repository),
     )
+    monkeypatch.setattr(api, "_verify_live_canonical_roots", lambda _connection: "a" * 64)
 
 
 def test_cases_endpoint_exposes_only_canonical_twenty() -> None:
@@ -91,6 +111,20 @@ def test_offline_health_is_ok_without_touching_database(monkeypatch) -> None:
         "mode": "offline",
         "database": "final",
         "database_status": "not_checked",
+        "clean_case_count": 20,
+        "dirty_case_count": 0,
+        "clean_case_ids": list(DEMO_IDS),
+        "case_states": {
+            case_id: {
+                "workflow_status": "simulated",
+                "current_agent": "simulation",
+                "followup_status": "simulation_only",
+                "followup_retry_after_seconds": None,
+            }
+            for case_id in DEMO_IDS
+        },
+        "ready_for_full_run": True,
+        "execution_notice": "OFFLINE SIMULATION — Azure and GCP are not used",
     }
 
 
@@ -145,9 +179,74 @@ def test_live_health_verifies_selected_final_database_and_closes_resources(monke
         "mode": "live",
         "database": "final",
         "database_status": "ok",
+        "exact_demo_roots": True,
+        "canonical_root_data": True,
+        "canonical_root_fingerprint": "a" * 64,
+        "clean_case_count": 20,
+        "dirty_case_count": 0,
+        "clean_case_ids": list(DEMO_IDS),
+        "case_states": {
+            case_id: {
+                "workflow_status": "running",
+                "current_agent": "triage_agent",
+                "followup_status": (
+                    "not_started" if case_id in {"demo10", "demo14"} else "not_applicable"
+                ),
+                "followup_retry_after_seconds": None,
+            }
+            for case_id in DEMO_IDS
+        },
+        "ready_for_full_run": True,
+        "execution_notice": "LIVE — ready for all 20 cases",
     }
     assert repository.connection.cursor_instance.closed is True
     assert repository.connection.closed is True
+
+
+@pytest.mark.parametrize(
+    ("workflow_status", "claim_age_seconds", "expected_status", "expected_retry"),
+    [
+        ("waiting_user", 0, "waiting_user", None),
+        ("running", 5, "in_progress", 25),
+        ("running", 31, "retryable", 0),
+    ],
+)
+def test_live_health_exposes_followup_recovery_state_after_page_reload(
+    monkeypatch,
+    workflow_status: str,
+    claim_age_seconds: int,
+    expected_status: str,
+    expected_retry: int | None,
+) -> None:
+    monkeypatch.setenv("REFUND_MODE", "live")
+    monkeypatch.setenv("REFUND_DB", "real")
+    monkeypatch.setenv("MYSQL_DATABASE", "final")
+    repository = _HealthRepository()
+    repository.connection.cursor_instance.execute("FROM workflow_runs workflow")
+    rows = repository.connection.cursor_instance.fetchall()
+    demo10 = next(row for row in rows if row["trace_id"] == "demo10")
+    demo10.update(
+        {
+            "status": workflow_status,
+            "audits": 1,
+            "followup_received": 1,
+            "followup_completed": 0,
+            "followup_claim_age_seconds": claim_age_seconds,
+        }
+    )
+    monkeypatch.setattr(repository.connection.cursor_instance, "fetchall", lambda: rows)
+    _install_health_repository(monkeypatch, repository)
+
+    response = TestClient(api.app).get("/api/health")
+
+    assert response.status_code == 200
+    state = response.json()["case_states"]["demo10"]
+    assert state == {
+        "workflow_status": workflow_status,
+        "current_agent": "triage_agent",
+        "followup_status": expected_status,
+        "followup_retry_after_seconds": expected_retry,
+    }
 
 
 def test_live_health_rejects_wrong_selected_database_and_closes_resources(monkeypatch) -> None:
@@ -230,6 +329,12 @@ def test_live_api_passes_resolved_seeded_case_to_runner_without_bootstrap(monkey
                 "success": True,
                 "matched_expectations": True,
                 "case_id": case_id,
+                "trace_id": case.trace_id,
+                "ticket_id": case.ticket_id,
+                "customer_id": case.customer_id,
+                "order_id": case.order_id,
+                "selected_order_id": case.selected_order_id,
+                "message": case.message,
                 "timings_ms": {"total": 1.0},
             }
 
@@ -255,6 +360,38 @@ def test_live_api_passes_resolved_seeded_case_to_runner_without_bootstrap(monkey
     assert result["ticket_id"] == "ticket-demo18"
     assert result["selected_order_id"] == "order-demo18"
     assert "order-demo99" in result["message"]
+    assert result["execution_boundary"] == {
+        "entrypoint": "refund_http_api",
+        "database": "final",
+        "azure": "real",
+    }
+
+
+def test_api_rejects_a_runner_result_with_fixture_identity_overwrite_attempt(monkeypatch) -> None:
+    case = load_demo_catalog().get("demo01")
+
+    class Runner:
+        def run_case(self, _case_id: str):
+            return {
+                "success": True,
+                "matched_expectations": True,
+                "case_id": "demo01",
+                "trace_id": "demo20",
+                "ticket_id": case.ticket_id,
+                "customer_id": case.customer_id,
+                "order_id": case.order_id,
+                "message": case.message,
+                "timings_ms": {"total": 1.0},
+            }
+
+    monkeypatch.setenv("REFUND_MODE", "live")
+    monkeypatch.setenv("REFUND_DB", "real")
+    monkeypatch.setattr(api, "_create_runner", lambda _mode: Runner())
+
+    response = api.refund(api.RefundRequest(case_id="demo01"))
+
+    assert response.status_code == 409
+    assert b"observed workflow identity mismatch: trace_id" in response.body
 
 
 def test_live_runner_configuration_requires_real_db_before_construction(monkeypatch) -> None:

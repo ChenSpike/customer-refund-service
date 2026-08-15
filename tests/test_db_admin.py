@@ -25,6 +25,10 @@ class FakeConnection:
         self.workflow_status_type = (
             "enum('running','waiting_user','paused_governance','pending_human','completed','failed')"
         )
+        self.root_rows = admin.expected_canonical_root_rows(
+            admin.load_fixture(),
+            phase="baseline",
+        )
         self.calls: list[tuple[str, object]] = []
         self.commits = 0
         self.rollbacks = 0
@@ -73,6 +77,22 @@ class FakeCursor:
             self.rows = [(self.connection.workflow_status_type,)]
         elif "LEFT JOIN" in normalized and normalized.startswith("SELECT COUNT(*)"):
             self.rows = [(0,)]
+        elif normalized.startswith("SELECT customer_id, email, full_name FROM customers"):
+            self.rows = list(self.connection.root_rows["customers"])
+        elif normalized.startswith(
+            "SELECT order_id, customer_id, product_type, purchase_date, item_status,"
+        ):
+            self.rows = list(self.connection.root_rows["orders"])
+        elif normalized.startswith(
+            "SELECT ticket_id, customer_id, raw_text, sanitized_text, refund_reason,"
+        ):
+            self.rows = list(self.connection.root_rows["tickets"])
+        elif normalized.startswith(
+            "SELECT trace_id, ticket_id, policy_version, status, current_agent, completed_at"
+        ):
+            self.rows = list(self.connection.root_rows["workflow_runs"])
+        elif normalized.startswith("SELECT trace_id, ticket_id, policy_version FROM workflow_runs"):
+            self.rows = [row[:3] for row in self.connection.root_rows["workflow_runs"]]
         elif match := re.match(r"SELECT COUNT\(\*\) FROM `([^`]+)`", normalized):
             self.rows = [(self.connection.counts[match.group(1)],)]
         elif match := re.match(r"SELECT `([^`]+)` FROM `([^`]+)`", normalized):
@@ -153,9 +173,11 @@ def test_fixture_has_exact_demo_allowlist_and_original_policy_distribution() -> 
         "human_approval": 10,
     }
     by_trace = {case["trace_id"]: case for case in cases}
-    for index in (4, 10, 14, 18):
+    for index in (4, 10, 13, 14, 18):
         trace_id = f"demo{index:02d}"
         assert by_trace[trace_id]["selected_order_id"] == f"order-{trace_id}"
+    for index in set(range(1, 21)) - {4, 10, 13, 14, 18}:
+        assert by_trace[f"demo{index:02d}"]["selected_order_id"] is None
     assert "order-demo99" in by_trace["demo13"]["ticket"]["raw_text"]
     assert "order-demo99" in by_trace["demo18"]["ticket"]["raw_text"]
 
@@ -286,6 +308,19 @@ def test_verify_baseline_checks_counts_ids_foreign_keys_and_enum() -> None:
         "refund_transactions": 0,
     }
     assert all(count == 0 for count in report["orphans"].values())
+    assert report["canonical_root_fingerprint"] == admin.canonical_root_fingerprint(
+        admin.load_fixture()
+    )
+
+
+def test_verify_baseline_rejects_a_mutated_seeded_order_fact() -> None:
+    connection = _baseline_connection()
+    first = list(connection.root_rows["orders"][0])
+    first[5] = "999.99"
+    connection.root_rows["orders"][0] = tuple(first)
+
+    with pytest.raises(admin.AdminError, match=r"orders canonical root content differs.*demo01"):
+        admin.verify_database(connection, admin.load_fixture(), phase="baseline")
 
 
 def test_verify_rejects_wrong_workflow_status_enum() -> None:

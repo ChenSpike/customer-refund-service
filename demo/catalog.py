@@ -13,6 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST_PATH = REPO_ROOT / "database" / "fixtures" / "demo_cases.json"
 DEMO_IDS = tuple(f"demo{index:02d}" for index in range(1, 21))
 FINAL_DATABASE = "final"
+REFUND_PORTAL_ORIGIN = "refund_portal"
+TRUSTED_UI_SELECTION_CASES = frozenset(
+    {"demo04", "demo10", "demo13", "demo14", "demo18"}
+)
 
 
 class DemoCatalogError(ValueError):
@@ -21,19 +25,40 @@ class DemoCatalogError(ValueError):
 
 @dataclass(frozen=True)
 class DemoExpectations:
-    policy_decision: str
-    policy_route: str
+    policy_decision: str | None
+    policy_route: str | None
     route: str
     outcome: str
     terminal_state: str
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, str | None]:
         return {
             "policy_decision": self.policy_decision,
             "policy_route": self.policy_route,
             "route": self.route,
             "outcome": self.outcome,
             "terminal_state": self.terminal_state,
+        }
+
+
+@dataclass(frozen=True)
+class DemoFollowUp:
+    message: str
+    refund_reason: str
+    requested_amount: float
+    currency: str
+    expectations: DemoExpectations
+
+    def request_payload(self, case: "DemoCase") -> dict[str, Any]:
+        """Return the exact customer-supplied continuation contract."""
+
+        return {
+            "message": self.message,
+            "customer_id": case.customer_id,
+            "order_id": case.order_id,
+            "refund_reason": self.refund_reason,
+            "requested_amount": self.requested_amount,
+            "currency": self.currency,
         }
 
 
@@ -50,39 +75,68 @@ class DemoCase:
     expectations: DemoExpectations
     evaluation_date: str
     policy_version: str
+    follow_up: DemoFollowUp | None
 
     @property
     def message(self) -> str:
         return str(self.ticket["raw_text"])
 
     @property
-    def selected_order_id(self) -> str:
-        """The canonical UI selection, including explicit override cases."""
+    def selected_order_id(self) -> str | None:
+        """Return only an explicit trusted UI selection from the fixture."""
 
-        return self.selected_order_override or self.order_id
+        return self.selected_order_override
 
     def graph_input(self) -> dict[str, Any]:
         """Return the fixed root state for a seeded, idempotent graph invocation."""
 
-        return {
+        request_context: dict[str, Any] = {
+            "trace_id": self.trace_id,
+            "ticket_id": self.ticket_id,
+            "demo_case_id": self.trace_id,
+            "request_origin": REFUND_PORTAL_ORIGIN,
+            "evaluation_date": self.evaluation_date,
+            "buggy_db": False,
+        }
+        graph_input: dict[str, Any] = {
             "user_id": self.customer_id,
             "message": self.message,
             "conversation_history": [],
+            "request_context": request_context,
+            "trace_id": self.trace_id,
+            "ticket_id": self.ticket_id,
+        }
+        if self.selected_order_id is not None:
+            request_context["selected_order_id"] = self.selected_order_id
+            graph_input["requested_order_id"] = self.selected_order_id
+        return graph_input
+
+    def follow_up_graph_input(self) -> dict[str, Any]:
+        """Return the guarded resume state for a waiting-customer workflow."""
+
+        if self.follow_up is None:
+            raise DemoCatalogError(f"{self.trace_id}: no customer follow-up is defined")
+        return {
+            "user_id": self.customer_id,
+            "message": self.follow_up.message,
+            "conversation_history": [{"role": "user", "content": self.message}],
             "request_context": {
                 "trace_id": self.trace_id,
                 "ticket_id": self.ticket_id,
                 "demo_case_id": self.trace_id,
-                "selected_order_id": self.selected_order_id,
+                "request_origin": REFUND_PORTAL_ORIGIN,
+                "selected_order_id": self.order_id,
+                "continuation_type": "customer_followup",
                 "evaluation_date": self.evaluation_date,
                 "buggy_db": False,
             },
-            "requested_order_id": self.selected_order_id,
             "trace_id": self.trace_id,
             "ticket_id": self.ticket_id,
+            "requested_order_id": self.order_id,
         }
 
     def public_summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "case_id": self.trace_id,
             "ticket_id": self.ticket_id,
             "customer_id": self.customer_id,
@@ -91,6 +145,12 @@ class DemoCase:
             "message": self.message,
             "expectations": self.expectations.as_dict(),
         }
+        if self.follow_up is not None:
+            summary["follow_up"] = {
+                **self.follow_up.request_payload(self),
+                "expectations": self.follow_up.expectations.as_dict(),
+            }
+        return summary
 
     def order_lookup_row(self) -> dict[str, Any]:
         """Return the same normalized shape as ``db.orders.get_order``."""
@@ -156,7 +216,12 @@ def resolve_demo_case(
             {
                 case.trace_id
                 for case in catalog.cases
-                if normalized_order in {case.order_id.lower(), case.selected_order_id.lower()}
+                if normalized_order
+                in {
+                    value.lower()
+                    for value in (case.order_id, case.selected_order_id)
+                    if value is not None
+                }
             }
         )
     if customer_id and customer_id.strip():
@@ -229,8 +294,17 @@ def _parse_case(
             raise DemoCatalogError(f"{trace_id}: {field} must be {expected!r}")
 
     selected = value.get("selected_order_id")
-    if selected is not None and selected != expected_ids["order_id"]:
-        raise DemoCatalogError(f"{trace_id}: selected_order_id must select its canonical order")
+    expected_selection = (
+        expected_ids["order_id"] if trace_id in TRUSTED_UI_SELECTION_CASES else None
+    )
+    if selected != expected_selection:
+        if expected_selection is None:
+            raise DemoCatalogError(
+                f"{trace_id}: selected_order_id must be absent unless the case declares trusted UI context"
+            )
+        raise DemoCatalogError(
+            f"{trace_id}: selected_order_id must explicitly select {expected_selection!r}"
+        )
     customer = _required_object(value, "customer", trace_id)
     order = _required_object(value, "order", trace_id)
     ticket = _required_object(value, "ticket", trace_id)
@@ -244,13 +318,45 @@ def _parse_case(
             raise DemoCatalogError(f"{trace_id}: order.{field} must be numeric")
     _required_text(ticket, "raw_text", trace_id)
 
+    legacy_policy_decision = _required_text(
+        expectations, "legacy_policy_decision", trace_id
+    )
+    legacy_policy_route = _required_text(expectations, "legacy_policy_route", trace_id)
+    policy_was_bypassed = trace_id in {"demo12", "demo13"}
     parsed_expectations = DemoExpectations(
-        policy_decision=_required_text(expectations, "legacy_policy_decision", trace_id),
-        policy_route=_required_text(expectations, "legacy_policy_route", trace_id),
+        # These two cases are stopped by deterministic Triage governance before
+        # Policy runs. Keep the historic Policy-only oracle in the raw fixture,
+        # but never advertise it as an observed end-to-end result.
+        policy_decision=None if policy_was_bypassed else legacy_policy_decision,
+        policy_route=None if policy_was_bypassed else legacy_policy_route,
         route=_required_text(expectations, "e2e_route", trace_id),
         outcome=_required_text(expectations, "e2e_outcome", trace_id),
         terminal_state=_required_text(expectations, "e2e_terminal_state", trace_id),
     )
+    follow_up = _parse_follow_up(value.get("follow_up"), trace_id)
+    if (trace_id in {"demo10", "demo14"}) != (follow_up is not None):
+        raise DemoCatalogError(
+            f"{trace_id}: customer follow-up is allowed only and always for demo10/demo14"
+        )
+    if follow_up is not None:
+        if parsed_expectations.as_dict() != {
+            "policy_decision": "request_info",
+            "policy_route": "response_agent",
+            "route": "response_agent",
+            "outcome": "need_info",
+            "terminal_state": "waiting_user",
+        }:
+            raise DemoCatalogError(
+                f"{trace_id}: follow_up requires an initial waiting_user request-info outcome"
+            )
+        if (
+            follow_up.refund_reason != "damaged"
+            or abs(follow_up.requested_amount - float(order["amount_paid"])) >= 0.005
+            or follow_up.currency != order.get("currency", "USD")
+        ):
+            raise DemoCatalogError(
+                f"{trace_id}: follow_up facts must describe the full damaged-order refund"
+            )
     return DemoCase(
         trace_id=trace_id,
         ticket_id=expected_ids["ticket_id"],
@@ -263,6 +369,44 @@ def _parse_case(
         expectations=parsed_expectations,
         evaluation_date=evaluation_date,
         policy_version=policy_version,
+        follow_up=follow_up,
+    )
+
+
+def _parse_follow_up(value: Any, trace_id: str) -> DemoFollowUp | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise DemoCatalogError(f"{trace_id}: follow_up must be an object")
+    requested_amount = value.get("requested_amount")
+    if (
+        not isinstance(requested_amount, (int, float))
+        or isinstance(requested_amount, bool)
+        or float(requested_amount) <= 0
+    ):
+        raise DemoCatalogError(f"{trace_id}: follow_up.requested_amount must be positive")
+    expectations = _required_object(value, "expectations", f"{trace_id}.follow_up")
+    parsed_expectations = DemoExpectations(
+        policy_decision=_required_text(expectations, "policy_decision", trace_id),
+        policy_route=_required_text(expectations, "policy_route", trace_id),
+        route=_required_text(expectations, "route", trace_id),
+        outcome=_required_text(expectations, "outcome", trace_id),
+        terminal_state=_required_text(expectations, "terminal_state", trace_id),
+    )
+    if parsed_expectations.as_dict() != {
+        "policy_decision": "approve",
+        "policy_route": "refund_agent",
+        "route": "refund_agent",
+        "outcome": "refund_issued",
+        "terminal_state": "completed",
+    }:
+        raise DemoCatalogError(f"{trace_id}: follow_up must complete through refund_agent")
+    return DemoFollowUp(
+        message=_required_text(value, "message", f"{trace_id}.follow_up"),
+        refund_reason=_required_text(value, "refund_reason", f"{trace_id}.follow_up"),
+        requested_amount=float(requested_amount),
+        currency=_required_text(value, "currency", f"{trace_id}.follow_up"),
+        expectations=parsed_expectations,
     )
 
 

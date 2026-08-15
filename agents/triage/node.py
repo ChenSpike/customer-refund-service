@@ -30,6 +30,10 @@ _REFUND_INTENT_RE = re.compile(
     r"\b(?:refund|money back|return (?:it|this|the item))\b",
     re.IGNORECASE,
 )
+_REFUND_PORTAL_ORIGIN = "refund_portal"
+_ORDER_SOURCE_TRUSTED_SELECTION = "trusted_ui_selection"
+_ORDER_SOURCE_AZURE_TOOL = "azure_tool_call"
+_ORDER_SOURCE_MISSING = "missing"
 _DISSATISFACTION_PATTERNS = (
     re.compile(r"\buncomfortable\b", re.IGNORECASE),
     re.compile(r"\bheadaches?\b", re.IGNORECASE),
@@ -80,6 +84,22 @@ def _dissatisfaction_reason_fallback(message: str) -> str | None:
     return None
 
 
+def _refund_intent_source(message: str, request_context: dict) -> str | None:
+    """Return the narrow evidence that authorizes a conventional full refund.
+
+    A direct integration must contain refund language. The canonical demo also
+    enters through a refund-only portal, whose explicit request-origin signal is
+    sufficient intent even when a damage report such as demo16 omits the word
+    ``refund``. Generic non-portal support messages do not inherit that intent.
+    """
+
+    if _REFUND_INTENT_RE.search(str(message or "")):
+        return "customer_message"
+    if request_context.get("request_origin") == _REFUND_PORTAL_ORIGIN:
+        return _REFUND_PORTAL_ORIGIN
+    return None
+
+
 def triage_node(state, *, responses_client=None, model: str | None = None) -> dict:
     active_client = responses_client or client
     active_model = model or deployment_for("triage")
@@ -90,6 +110,11 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
         or request_context.get("selected_order_id")
         or ""
     ).strip()
+    order_resolution_source = (
+        _ORDER_SOURCE_TRUSTED_SELECTION
+        if selected_order_id
+        else _ORDER_SOURCE_MISSING
+    )
 
     trace_id = state.get("trace_id") or str(uuid.uuid4())
     ticket_id = state.get("ticket_id") or str(uuid.uuid4())
@@ -118,6 +143,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
             return {
                 **ids,
                 "user_id": user_id,
+                "order_resolution_source": _ORDER_SOURCE_MISSING,
                 "llm_input_tokens": 0,
                 "llm_output_tokens": 0,
                 "user_action_required": False,
@@ -138,6 +164,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
             return {
                 **ids,
                 "user_id": user_id,
+                "order_resolution_source": _ORDER_SOURCE_MISSING,
                 "llm_input_tokens": first_input_tokens,
                 "llm_output_tokens": first_output_tokens,
                 "user_action_required": True,
@@ -156,6 +183,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
     else:
         args = json.loads(tool_call.arguments)
         order_id = args["order_id"]
+        order_resolution_source = _ORDER_SOURCE_AZURE_TOOL
     raw_result = order_database_lookup(order_id, buggy=buggy)
 
     if raw_result is None:
@@ -163,6 +191,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
         return {
             **ids,
             "user_id": user_id,
+            "order_resolution_source": order_resolution_source,
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
             "user_action_required": True,
@@ -180,6 +209,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
             **ids,
             "user_id": user_id,
             "requested_order_id": order_id,
+            "order_resolution_source": order_resolution_source,
             "llm_input_tokens": first_input_tokens,
             "llm_output_tokens": first_output_tokens,
             "order_lookup_result": raw_result,
@@ -220,11 +250,14 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
     if reason is None:
         reason = _dissatisfaction_reason_fallback(message)
     requested_amount = parse_requested_amount(classification.get("requested_amount"))
-    if requested_amount is None and reason is not None:
+    refund_intent_source = _refund_intent_source(message, request_context)
+    if requested_amount is None and reason is not None and refund_intent_source is not None:
         # In this refund-service workflow, a recognized reason conventionally
-        # means the full order amount when the customer does not quote a number.
-        # Do not infer an amount when the reason itself is missing: demo10 and
-        # demo14 must retain structurally missing facts for request_info.
+        # means the full order amount when the customer does not quote a number,
+        # but only when intent is explicit in the message or in trusted
+        # refund-portal context. Do not infer an amount when either the reason or
+        # intent is missing: demo10/demo14 retain structurally missing facts and
+        # non-portal damage reports do not silently become refund requests.
         requested_amount = float(raw_result["amount_paid"])
 
     triage_output = {
@@ -233,6 +266,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
             "ticket_id": ticket_id,
             "goal": "evaluate refund eligibility",
             "policy_version": "v1.0",
+            "order_resolution_source": order_resolution_source,
         },
         "customer_request": {
             "sanitized_text": light_clean(message),
@@ -254,6 +288,7 @@ def triage_node(state, *, responses_client=None, model: str | None = None) -> di
         **ids,
         "user_id": user_id,
         "requested_order_id": order_id,
+        "order_resolution_source": order_resolution_source,
         "llm_input_tokens": total_input_tokens,
         "llm_output_tokens": total_output_tokens,
         "order_lookup_result": raw_result,

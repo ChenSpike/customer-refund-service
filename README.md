@@ -91,6 +91,11 @@ Live mode invokes the state-driven graph, Azure OpenAI, and the seeded GCP datab
 
 The process exits nonzero if an execution fails or any graph result or persisted artifact differs from its manifest expectation. `run-all` isolates failures and reports per-case workflow/total timing. The live runner requires each selected trace to be at its clean seeded baseline and refuses a dirty rerun; use the guarded `db.admin reset` command before another benchmark. `--output` keeps the complete result and per-case GCP evidence as a UTF-8 JSON report.
 
+This CLI report is graph/Azure/GCP persistence evidence. It does not traverse
+the public refund HTTP endpoint or read the result back through the dashboard
+HTTP API; use the strict HTTP acceptance command below for that boundary-level
+claim.
+
 ## Run the APIs and UIs
 
 Use separate terminals from the repository root.
@@ -169,6 +174,58 @@ $env:REFUND_DB = "real"
 $env:MYSQL_DATABASE = "final"
 .\.venv\Scripts\python.exe -m uvicorn refund_app.api:app --host 127.0.0.1 --port 8077
 ```
+
+After the initial batch, `demo10` and `demo14` are durably `waiting_user` at
+Triage. Their case cards expose the canonical missing facts and a **Continue
+customer → Triage** control. The corresponding
+`POST /api/refund/{case_id}/follow-up` boundary is live-only, accepts only the
+exact fixture facts, keeps the same trace/ticket/customer/order roots, preserves
+the first request-info cycle, and returns the stored completion on an identical
+replay. The control remains available after a browser reload because readiness
+comes from persisted workflow state rather than page memory.
+
+### Strict HTTP acceptance
+
+Start both live API processes above against a clean, guarded `final` baseline,
+then run the acceptance client from a third terminal. It uses real TCP HTTP; it
+does not import either FastAPI application or substitute `TestClient`:
+
+```powershell
+.\.venv\Scripts\python.exe -m demo.http_acceptance `
+    --confirm-live final `
+    --output reports/final-http-e2e.json
+```
+
+The harness rejects offline/fake/non-`final` health, requires the exact ordered
+`demo01` through `demo20` catalog, submits each case through `POST /api/refund`,
+and requires HTTP 200, `success=true`, `matched_expectations=true`, exact
+identities/route/outcome/state, and complete persistence checks. It then reads
+each case through `GET /api/cases/{trace_id}` and cross-checks dashboard cases,
+metrics, audit, governance, and pending-approval endpoints. After the initial
+20-case projection is proved, it submits the canonical customer facts for
+`demo10` and `demo14` through their public follow-up endpoints, requires both
+workflows to resume through Triage → Policy → Refund → Response, checks the
+completed dashboard projections, and identically replays each request to prove
+idempotency. The durable report
+records the service URLs, Git commit/dirty state, fixture SHA-256, and raw JSON
+evidence. The default proof intentionally leaves all manual-review cases
+pending.
+
+To include the optional demo07 approval and identical idempotent replay in the
+same clean-baseline run, add explicit reviewer inputs:
+
+```powershell
+.\.venv\Scripts\python.exe -m demo.http_acceptance `
+    --confirm-live final `
+    --approval-decision partial_refund `
+    --approval-amount 199.99 `
+    --approval-reviewer "demo-reviewer" `
+    --approval-notes "Approved during the final HTTP acceptance demonstration." `
+    --output reports/final-http-e2e-with-approval.json
+```
+
+This is API-level system evidence. Browser interaction and visual rendering
+remain a separate UI QA step.
 
 ## Verification
 

@@ -65,12 +65,25 @@ def simulate_case(case: DemoCase) -> dict[str, Any]:
         "customer_id": case.customer_id,
         "order_id": case.order_id,
         "selected_order_id": case.selected_order_id,
+        "order_resolution_source": (
+            "trusted_ui_selection" if case.selected_order_id else "offline_fixture"
+        ),
         "message": case.message,
+        "expected_message": case.message,
         "route": expected.route,
-        "policy_decision": expected.policy_decision,
+        "policy_decision": None if triage_status == "block" else expected.policy_decision,
         "final_outcome": expected.outcome,
         "workflow_status": expected.terminal_state,
         "response_body": body,
+        "response_content_checks": {
+            "decision_reflected": True,
+            "missing_info_requested": True,
+            "safe_summary_reflected": True,
+            "outcome_anchor_reflected": True,
+            "pii_fields_detected": [],
+            "forbidden_phrases": [],
+            "simulation_only": True,
+        },
         "governance": {
             "triage": triage_status,
             "policy": policy_status,

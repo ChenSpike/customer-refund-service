@@ -117,6 +117,7 @@ class PipelineStore:
             }
         )
         usage = policy_usage_from_state(state)
+        followup_claim_token = _followup_claim_token(state)
         handoff_id = self.persist_policy_artifacts(
             policy_input=reconstructed.policy_input,
             policy_output=policy_output,
@@ -124,6 +125,7 @@ class PipelineStore:
             precedent_context=reconstructed.precedent_context,
             governance_assessment=governance,
             usage=usage,
+            followup_claim_token=followup_claim_token,
         )
         next_agent = policy_output.handoff.next_agent
         return PolicyPersistenceArtifacts(
@@ -162,6 +164,11 @@ class PipelineStore:
             },
             output_payload={
                 "triage_output": state.get("triage_output"),
+                **(
+                    {"order_resolution_source": state["order_resolution_source"]}
+                    if state.get("order_resolution_source")
+                    else {}
+                ),
                 "triage_governance_result": state.get("triage_governance_result"),
                 "triage_handoff": handoff,
             },
@@ -170,6 +177,7 @@ class PipelineStore:
             audit_event_type="triage_agent_evaluated",
             workflow_status="waiting_human" if next_agent == "human_approval" else "running",
             current_agent=next_agent,
+            **_followup_token_kwargs(state),
         )
         return TriagePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
 
@@ -216,6 +224,7 @@ class PipelineStore:
             audit_event_type="response_agent_evaluated",
             workflow_status=workflow_status,
             current_agent=current_agent,
+            **_followup_token_kwargs(state),
         )
         return ResponsePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
 
@@ -229,6 +238,7 @@ class PipelineStore:
             policy_decision=state.get("policy_decision") or {},
             order_lookup_result=state.get("order_lookup_result") or {},
             refund_result=refund_result,
+            **_followup_token_kwargs(state),
         )
         return RefundPersistenceArtifacts(
             transaction_id=transaction_id,
@@ -245,7 +255,13 @@ class PipelineStore:
         precedent_context: PrecedentContext,
         governance_assessment: GovernanceAssessment,
         usage: TokenUsage,
+        followup_claim_token: str | None = None,
     ) -> str:
+        kwargs = (
+            {"followup_claim_token": followup_claim_token}
+            if followup_claim_token is not None
+            else {}
+        )
         return self.repository.persist_result(
             policy_input,
             policy_output,
@@ -253,6 +269,7 @@ class PipelineStore:
             precedent_context,
             governance_assessment.findings,
             usage,
+            **kwargs,
         )
 
 
@@ -304,3 +321,18 @@ def _validate_policy_handoff(
         raise ValueError("policy_handoff must be present before Policy persistence")
     if parent_agent_for_route(handoff) != output.handoff.next_agent:
         raise ValueError("policy_handoff disagrees with the validated Policy output")
+
+
+def _followup_claim_token(state: dict[str, Any]) -> str | None:
+    context = state.get("request_context") or {}
+    if context.get("continuation_type") != "customer_followup":
+        return None
+    token = str(context.get("followup_claim_token") or "").strip()
+    if not token:
+        raise ValueError("customer follow-up persistence requires a claim token")
+    return token
+
+
+def _followup_token_kwargs(state: dict[str, Any]) -> dict[str, str]:
+    token = _followup_claim_token(state)
+    return {"followup_claim_token": token} if token is not None else {}

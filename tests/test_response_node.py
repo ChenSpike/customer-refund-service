@@ -249,6 +249,13 @@ def test_response_node_does_not_hide_azure_failure(monkeypatch):
         response_node(_approve_state())
 
 
+def test_response_node_does_not_replace_an_empty_azure_draft(monkeypatch):
+    _install(monkeypatch, [FakeResponse([MessageItem("")], usage=(10, 0))])
+
+    with pytest.raises(RuntimeError, match="returned an empty draft"):
+        response_node(_approve_state())
+
+
 def test_response_node_content_checks_placeholders(monkeypatch):
     """PII/tool checks remain external while semantic checks are deterministic."""
     draft = "Your refund is approved. Customer Support Team"
@@ -268,7 +275,7 @@ def test_response_node_content_checks_placeholders(monkeypatch):
         ("partial_refund", "A partial refund has been processed successfully."),
         ("denied", "Your refund request has been denied."),
         ("need_info", "We need more information before we can complete the refund review."),
-        ("manual_review", "Your refund request has been sent for human review."),
+        ("manual_review", "Your case has been sent for human review."),
         ("refund_failed", "We could not complete your refund and will follow up."),
     ],
 )
@@ -311,7 +318,7 @@ def test_missing_anchor_is_inserted_immediately_after_greeting(monkeypatch):
     checks = out["response_result"]["content_checks"]
 
     assert body.startswith(
-        "Hello,\n\nYour refund request has been sent for human review.\n\nThanks"
+        "Hello,\n\nYour case has been sent for human review.\n\nThanks"
     )
     assert checks["outcome_anchor_inserted"] is True
     assert checks["outcome_anchor_reflected"] is True
@@ -329,7 +336,7 @@ def test_inserted_anchor_does_not_hide_contradictory_azure_prose(monkeypatch):
     body = out["response_result"]["response"]["body"]
     checks = out["response_result"]["content_checks"]
 
-    assert "Your refund request has been sent for human review." in body
+    assert "Your case has been sent for human review." in body
     assert "your refund has been approved" in body
     assert checks["outcome_anchor_reflected"] is True
     assert checks["decision_reflected"] is False
@@ -359,6 +366,43 @@ def test_inserted_anchor_does_not_bypass_safe_summary_or_required_info(monkeypat
     need_info = response_node(info_state)["response_result"]["content_checks"]
     assert need_info["outcome_anchor_reflected"] is True
     assert need_info["missing_info_requested"] is False
+
+
+def test_request_info_translates_internal_fact_paths_before_prompting():
+    state = {
+        "policy_decision": {
+            "decision": "request_info",
+            "missing_info_to_request": [
+                "Please provide customer_request.refund_reason",
+                "Please provide customer_request.requested_amount against the order facts",
+            ],
+        }
+    }
+
+    payload = build_response_payload(state)
+    prompt = _build_prompt(payload)
+
+    assert payload["required_information"] == [
+        "what went wrong with the item or why you are requesting a refund",
+        "the refund amount you are requesting",
+    ]
+    assert "customer_request" not in prompt
+    assert "order facts" not in prompt.lower()
+
+
+def test_privacy_governance_review_uses_the_customer_issue_not_refund_wording():
+    state = {
+        "policy_decision": {"decision": "manual_review"},
+        "triage_governance_result": {
+            "findings": [{"name": "data_leakage", "status": "block"}],
+        },
+    }
+
+    payload = build_response_payload(state)
+
+    assert "account-information concern" in payload["message"]
+    assert payload["outcome_anchor"] == "Your case has been sent for human review."
+    assert "refund request" not in payload["message"].lower()
 
 
 @pytest.mark.parametrize(

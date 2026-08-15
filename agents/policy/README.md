@@ -37,7 +37,7 @@ Refund execution, customer response generation, and human resolution are downstr
 
 ## Input Contract
 
-The parent passes the Triage JSON in `AppState.triage_output`. Standalone mode reads the same payload from `main_db.agent_handoffs.output_json` where `from_agent = 'triage_agent'` and `to_agent = 'policy_agent'`.
+The parent passes the Triage JSON in `AppState.triage_output`. In the final demo, that payload is persisted in `final.agent_handoffs.output_json` where `from_agent = 'triage_agent'` and `to_agent = 'policy_agent'`.
 
 `exact_policy_input()` removes Triage-only fields such as `case.goal` and constructs the Proposal input in this order:
 
@@ -164,15 +164,9 @@ The persisted Proposal output remains ordered as:
 
 A human approval has exactly one typed trigger: `policy_review` or `governance`. Its `triggering_event_id` points to the corresponding event. Approval routing preserves the business decision: approved manual reviews continue to `refund_agent`, while a rejected review continues to `response_agent`.
 
-## Standalone Worker
+## Final integration
 
-`PolicyAgentService` supports Policy-only execution before the full parent workflow is deployed. It reads a Triage handoff, builds the same AppState input, invokes the same three-node subgraph, reconstructs the same output, and uses the same `PipelineStore`. It does not contain a second Policy implementation.
-
-```powershell
-python -m agents.policy.cli run --pending
-python -m agents.policy.cli run --trace TRACE-POL-001
-python -m agents.policy.cli run --all
-```
+The former Policy-only command and `TRACE-POL-*` benchmark are retired in this branch because they bypass Triage, Refund, Response, the public APIs, and the dashboard. Use the root `main.py` only for graph diagnostics, or use the documented refund HTTP service plus `demo.http_acceptance` for the fixed `demo01` through `demo20` full-stack contract. `PolicyAgentService` remains an internal adapter; it is not a release acceptance entry point.
 
 ## Configuration
 
@@ -195,15 +189,17 @@ MYSQL_HOST
 MYSQL_PORT=3306
 MYSQL_USER
 MYSQL_PASSWORD
+MYSQL_DATABASE=final
 MYSQL_CONNECT_TIMEOUT=10
 ```
 
 The Responses API requires Azure API version `2025-03-01-preview` or later. Credentials are never committed.
 
-Verify configuration and the existing cloud schema without changing data:
+Verify the final database configuration and schema without changing data:
 
 ```powershell
-python -m agents.policy.cli check
+python -m db.admin doctor --database final
+python -m db.admin verify --database final --phase runtime
 ```
 
 ## Testing
@@ -216,24 +212,12 @@ python -m compileall -q .
 git diff --check
 ```
 
-The live benchmark is destructive only within `TRACE-POL-001` through `TRACE-POL-020`. It snapshots unrelated rows, removes only those traces' previous Policy artifacts, preserves their Triage source handoffs and workflow source data, runs both Azure nodes for every case, and verifies database integrity.
-
-Run it only with explicit authorization:
-
-```powershell
-$env:RUN_POLICY_AGENT_LIVE_TESTS = "1"
-python -m pytest agents\policy\tests\test_cloud_pipeline_20_cases.py -q -m live
-Remove-Item Env:RUN_POLICY_AGENT_LIVE_TESTS
-```
-
-Expected benchmark distributions are 5 approvals, 5 denials, 8 manual reviews, and 2 information requests; routes are 4 refund, 6 response, and 10 human approval.
+The strict live acceptance command is documented in the root README. It enters through the refund HTTP API, checks every case through the dashboard HTTP API, and fails closed unless the selected database is exactly `final` with a clean `demo01` through `demo20` baseline.
 
 ## Current Limitations
 
 - Precedent memory is a versioned YAML file and is currently empty; another process must populate it from finalized human reviews.
 - No vector retrieval or Qdrant adapter is implemented.
-- The benchmark evaluates Policy outputs and persistence, not downstream refund execution, customer outcomes, or completed human decisions.
+- Refund execution is a deterministic local adapter for this demo; it persists transactions but does not move real funds.
 - Token counts are stored; cost is not stored.
-- Competing writers and concurrent benchmark resets are outside the current scope.
-
-The latest benchmark report is `reports/Policy_Agent_GCP_20_Case_Performance_Report.docx`.
+- Keep both HTTP services loopback-only unless reviewer authentication and authorization are added.

@@ -27,6 +27,21 @@ class DatabaseGovernanceEventRepository(GovernanceEventStore):
 		self.backend = backend
 
 	def save_event(self, statement: GovernanceStatement) -> str:
+		# Governance nodes receive only a statement, not the graph state.  The
+		# request-local fence keeps continuation writes tied to the newest lease
+		# without changing the shared governance contract.
+		from db.followup_context import active_followup_fence
+
+		fence = active_followup_fence()
+		if fence is not None:
+			if fence.trace_id != statement.trace_id:
+				raise RuntimeError(
+					"customer follow-up governance write crossed its trace fence"
+				)
+			return self.backend.save_governance_event_record(
+				statement,
+				followup_claim_token=fence.claim_token,
+			)
 		return self.backend.save_governance_event_record(statement)
 
 	def get_event(self, trace_id: str, agent: str) -> GovernanceStatement | None:

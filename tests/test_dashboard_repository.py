@@ -39,6 +39,11 @@ class FakeCursor:
                 "policy_review_type": "low_confidence",
                 "policy_review_detail": "A reviewer must confirm the exception.",
                 "policy_ids_json": '["POL-RET-01"]',
+                "ticket_requested_amount": 79.99,
+                "ticket_currency": "USD",
+                "order_amount_paid": 99.99,
+                "order_prior_refund_total": 20.0,
+                "order_currency": "USD",
             }
         ]
 
@@ -76,6 +81,11 @@ def test_pending_approval_query_joins_both_typed_trigger_sources_and_closes_reso
     query, params = connection.cursor_value.executed[1]
     assert "triggering_event_type = 'governance'" in query
     assert "triggering_event_type = 'policy_review'" in query
+    assert "JOIN workflow_runs" in query
+    assert "JOIN tickets" in query
+    assert "LEFT JOIN orders" in query
+    assert "ticket_requested_amount" in query
+    assert "order_prior_refund_total" in query
     assert params == (20,)
     assert connection.cursor_value.closed is True
     assert connection.closed is True
@@ -117,3 +127,20 @@ def test_database_config_status_marks_non_final_database_unsafe(monkeypatch):
 
     assert status["status"] == "unsafe_database"
     assert status["database"] == "main_db"
+
+
+def test_trace_history_queries_use_stable_primary_key_tiebreaks():
+    cursor = FakeCursor()
+
+    DashboardRepository._bulk_by_trace(cursor, "agent_handoffs", ["demo10"])
+    bulk_query = cursor.executed[-1][0]
+    DashboardRepository._for_trace(
+        cursor,
+        "governance_events",
+        "demo10",
+        descending=True,
+    )
+    trace_query = cursor.executed[-1][0]
+
+    assert "ORDER BY trace_id, created_at, handoff_id" in bulk_query
+    assert "ORDER BY created_at DESC, event_id DESC" in trace_query

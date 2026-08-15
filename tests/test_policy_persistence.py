@@ -120,6 +120,7 @@ def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
             "ticket_id": "TICKET-TRIAGE-001",
             "message": "My item arrived damaged",
             "user_id": "CUST-001",
+            "order_resolution_source": "azure_tool_call",
             "triage_output": {"customer_request": {"refund_reason": "damaged"}},
             "triage_governance_result": {"status": "allow", "findings": []},
             "triage_handoff": "policy",
@@ -146,6 +147,7 @@ def test_triage_persistence_writes_backend_and_returns_handoff_id() -> None:
             },
             "output_payload": {
                 "triage_output": {"customer_request": {"refund_reason": "damaged"}},
+                "order_resolution_source": "azure_tool_call",
                 "triage_governance_result": {"status": "allow", "findings": []},
                 "triage_handoff": "policy",
             },

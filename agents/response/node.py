@@ -118,8 +118,16 @@ _OUTCOME_ANCHORS = {
     "partial_refund": "A partial refund has been processed successfully.",
     "denied": "Your refund request has been denied.",
     "need_info": "We need more information before we can complete the refund review.",
-    "manual_review": "Your refund request has been sent for human review.",
+    "manual_review": "Your case has been sent for human review.",
     "refund_failed": "We could not complete your refund and will follow up.",
+}
+
+_CUSTOMER_FACING_INFORMATION = {
+    "customer_request.refund_reason": "what went wrong with the item or why you are requesting a refund",
+    "customer_request.requested_amount": "the refund amount you are requesting",
+    "order_facts.order_id": "your order number",
+    "order_facts.item_status": "the item's current delivery or return status",
+    "order_facts.product_type": "which item the request is about",
 }
 
 
@@ -222,12 +230,16 @@ def _required_information(state: AppState, final_outcome: str) -> list[str]:
     )
     if isinstance(requested, str):
         requested = [requested]
-    items = [str(item).strip() for item in requested if str(item).strip()]
+    items = [
+        _customer_facing_information(str(item))
+        for item in requested
+        if str(item).strip()
+    ]
     if items:
         return items
     missing_fields = state.get("missing_fields") or []
     items = [
-        str(field).replace("_", " ").strip()
+        _customer_facing_information(str(field))
         for field in missing_fields
         if str(field).strip()
     ]
@@ -235,6 +247,37 @@ def _required_information(state: AppState, final_outcome: str) -> list[str]:
         return items
     question = str(state.get("clarification_question") or "").strip()
     return [question] if question else []
+
+
+def _customer_facing_information(value: str) -> str:
+    """Translate internal fact paths before any text reaches a customer."""
+
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    for path, label in _CUSTOMER_FACING_INFORMATION.items():
+        if path in cleaned:
+            return label
+    # Unknown dotted paths are still internal implementation details. Retain
+    # ordinary prose, but convert identifier-like field names to plain words.
+    if re.search(r"\b[a-z]+(?:_[a-z]+|\.[a-z_]+)+\b", cleaned):
+        return re.sub(r"[_.]+", " ", cleaned).strip()
+    return cleaned
+
+
+def _manual_review_message(state: AppState) -> str:
+    findings = (state.get("triage_governance_result") or {}).get("findings") or []
+    labels = {
+        str(finding.get("flag") or finding.get("name") or "").lower()
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    if any("pii" in label or "leak" in label for label in labels):
+        return (
+            "We found an account-information concern that requires a specialist review "
+            "before we can continue."
+        )
+    return "A specialist needs to review the details before we can continue."
 
 
 def _response_payload(
@@ -449,7 +492,7 @@ def build_response_payload(state: AppState) -> dict:
     if decision_type == "request_info":
         return _response_payload(
             state,
-            message=f"We need more information to continue. {reason}".strip(),
+            message="We need a few more details before we can continue.",
             final_outcome="need_info",
             workflow_status="waiting_user",
         )
@@ -457,7 +500,7 @@ def build_response_payload(state: AppState) -> dict:
     if decision_type == "manual_review":
         return _response_payload(
             state,
-            message="Your request has been sent for human review.",
+            message=_manual_review_message(state),
             final_outcome="manual_review",
             workflow_status="waiting_human",
         )
@@ -500,7 +543,7 @@ def response_node(
         raise RuntimeError(f"Azure Response Agent {category} failed") from exc
 
     if not draft:
-        draft = "Thank you for contacting us. A member of our team will be in touch shortly."
+        raise RuntimeError("Azure Response Agent returned an empty draft")
 
     draft, outcome_anchor_inserted = _ensure_outcome_anchor(draft, payload)
     word_count = len(draft.split())

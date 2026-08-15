@@ -106,8 +106,8 @@ def test_build_response_payload_for_manual_review():
     )
 
     assert payload == {
-        "message": "Your request has been sent for human review.",
+        "message": "A specialist needs to review the details before we can continue.",
         "final_outcome": "manual_review",
         "workflow_status": "waiting_human",
-        "outcome_anchor": "Your refund request has been sent for human review.",
+        "outcome_anchor": "Your case has been sent for human review.",
     }

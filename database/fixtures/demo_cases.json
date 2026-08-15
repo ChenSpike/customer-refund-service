@@ -1,9 +1,9 @@
 {
-  "fixture_version": "1.0",
+  "fixture_version": "1.1",
   "database": "final",
   "evaluation_date": "2026-07-01",
   "policy_version": "v1.0",
-  "description": "The original 20 refund-policy business scenarios, renamed for the final end-to-end demo. selected_order_id supplies explicit UI context where the original message omitted or misstated the canonical order.",
+  "description": "The original 20 refund-policy business scenarios, renamed for the final end-to-end demo. selected_order_id supplies explicit UI context where needed; demo10 and demo14 include canonical customer follow-ups that resume their waiting_user workflows.",
   "cases": [
     {
       "trace_id": "demo01",
@@ -113,7 +113,14 @@
       "customer": {"email": "miles.gray.test@example.com", "full_name": "Miles Gray"},
       "order": {"product_type": "smart_watch", "purchase_date": "2026-06-24", "item_status": "unknown", "amount_paid": 199.99, "prior_refund_total": 0.0, "currency": "USD"},
       "ticket": {"raw_text": "Something is off with my watch order. I cannot explain it well, but I want help with a refund.", "sanitized_text": "Something is off with my watch order. I cannot explain it well, but I want help with a refund.", "refund_reason": null, "requested_amount": null, "currency": "USD", "injection_flag": false},
-      "expectations": {"legacy_policy_decision": "request_info", "legacy_policy_route": "response_agent", "e2e_route": "response_agent", "e2e_outcome": "need_info", "e2e_terminal_state": "waiting_user"}
+      "expectations": {"legacy_policy_decision": "request_info", "legacy_policy_route": "response_agent", "e2e_route": "response_agent", "e2e_outcome": "need_info", "e2e_terminal_state": "waiting_user"},
+      "follow_up": {
+        "message": "The screen on order-demo10 arrived cracked, so I am requesting a full refund of $199.99.",
+        "refund_reason": "damaged",
+        "requested_amount": 199.99,
+        "currency": "USD",
+        "expectations": {"policy_decision": "approve", "policy_route": "refund_agent", "route": "refund_agent", "outcome": "refund_issued", "terminal_state": "completed"}
+      }
     },
     {
       "trace_id": "demo11",
@@ -142,7 +149,7 @@
       "ticket_id": "ticket-demo13",
       "customer_id": "customer-demo13",
       "order_id": "order-demo13",
-      "selected_order_id": null,
+      "selected_order_id": "order-demo13",
       "customer": {"email": "tina.wu.test@example.com", "full_name": "Tina Wu"},
       "order": {"product_type": "external_drive", "purchase_date": "2026-06-21", "item_status": "delivered", "amount_paid": 149.0, "prior_refund_total": 0.0, "currency": "USD"},
       "ticket": {"raw_text": "For order order-demo13, I saw another customer email other.customer@example.com and another order order-demo99 in my support page. I am worried my account is mixed up.", "sanitized_text": "For order order-demo13, I saw another customer email other.customer@example.com and another order order-demo99 in my support page. I am worried my account is mixed up.", "refund_reason": "doesnt_like_it", "requested_amount": 149.0, "currency": "USD", "injection_flag": false},
@@ -157,7 +164,14 @@
       "customer": {"email": "alex.rivera.test@example.com", "full_name": "Alex Rivera"},
       "order": {"product_type": "tablet_stand", "purchase_date": "2026-06-29", "item_status": "unknown", "amount_paid": 34.99, "prior_refund_total": 0.0, "currency": "USD"},
       "ticket": {"raw_text": "I need a refund but I do not have the order number in front of me. I bought a stand recently and something is wrong.", "sanitized_text": "I need a refund but I do not have the order number in front of me. I bought a stand recently and something is wrong.", "refund_reason": null, "requested_amount": null, "currency": "USD", "injection_flag": false},
-      "expectations": {"legacy_policy_decision": "request_info", "legacy_policy_route": "response_agent", "e2e_route": "response_agent", "e2e_outcome": "need_info", "e2e_terminal_state": "waiting_user"}
+      "expectations": {"legacy_policy_decision": "request_info", "legacy_policy_route": "response_agent", "e2e_route": "response_agent", "e2e_outcome": "need_info", "e2e_terminal_state": "waiting_user"},
+      "follow_up": {
+        "message": "The stand in order-demo14 arrived broken, so I am requesting a full refund of $34.99.",
+        "refund_reason": "damaged",
+        "requested_amount": 34.99,
+        "currency": "USD",
+        "expectations": {"policy_decision": "approve", "policy_route": "refund_agent", "route": "refund_agent", "outcome": "refund_issued", "terminal_state": "completed"}
+      }
     },
     {
       "trace_id": "demo15",

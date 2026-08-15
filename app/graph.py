@@ -82,11 +82,24 @@ class HumanApprovalNode:
     def __call__(self, state: AppState) -> dict:
         reason = state.get("review_trigger_reason") or "manual_review"
         stage = _review_trigger_stage(state)
+        request_context = state.get("request_context") or {}
+        followup_token = (
+            str(request_context.get("followup_claim_token") or "").strip()
+            if request_context.get("continuation_type") == "customer_followup"
+            else None
+        )
+        if request_context.get("continuation_type") == "customer_followup" and not followup_token:
+            raise ValueError("customer follow-up human review requires a claim token")
         approval_id = self.repository.ensure_human_approval(
             trace_id=str(state.get("trace_id") or ""),
             reason=reason,
             stage=stage,
             policy_decision=state.get("policy_decision") or {},
+            **(
+                {"followup_claim_token": followup_token}
+                if followup_token is not None
+                else {}
+            ),
         )
         return {
             "current_stage": "human_approval",

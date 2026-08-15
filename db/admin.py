@@ -8,10 +8,13 @@ so its core functions can be exercised with mocked MySQL connections.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -35,6 +38,7 @@ OUTPUT_TABLES = (
 )
 APPLICATION_TABLES = CORE_TABLES + OUTPUT_TABLES
 DEMO_TRACE_IDS = tuple(f"demo{index:02d}" for index in range(1, 21))
+TRUSTED_UI_SELECTION_CASES = frozenset({4, 10, 13, 14, 18})
 
 EXPECTED_FOREIGN_KEYS = frozenset(
     {
@@ -240,8 +244,13 @@ def validate_fixture(payload: dict[str, Any]) -> None:
         seen_emails.add(email)
         if case.get("order", {}).get("purchase_date") is None:
             raise AdminError(f"{trace_id}: purchase_date is required")
-        if index in {4, 10, 14, 18} and case.get("selected_order_id") != expected_ids["order_id"]:
-            raise AdminError(f"{trace_id}: selected_order_id must explicitly select its canonical order")
+        expected_selection = (
+            expected_ids["order_id"] if index in TRUSTED_UI_SELECTION_CASES else None
+        )
+        if case.get("selected_order_id") != expected_selection:
+            raise AdminError(
+                f"{trace_id}: selected_order_id must be {expected_selection!r}"
+            )
         expectations = case.get("expectations", {})
         for field in ("legacy_policy_decision", "legacy_policy_route", "e2e_route", "e2e_terminal_state"):
             if not expectations.get(field):
@@ -481,6 +490,183 @@ def _expected_core_ids(fixture: dict[str, Any]) -> dict[str, set[str]]:
     }
 
 
+def expected_canonical_root_rows(
+    fixture: dict[str, Any],
+    *,
+    phase: str = "baseline",
+) -> dict[str, list[tuple[Any, ...]]]:
+    """Return normalized fixture rows for every persistent workflow root.
+
+    Runtime verification deliberately excludes mutable workflow status fields,
+    while baseline verification also requires the exact clean starting state.
+    """
+
+    if phase not in {"baseline", "runtime"}:
+        raise AdminError("Verification phase must be baseline or runtime")
+    rows: dict[str, list[tuple[Any, ...]]] = {
+        "customers": [],
+        "orders": [],
+        "tickets": [],
+        "workflow_runs": [],
+    }
+    for case in fixture["cases"]:
+        customer = case["customer"]
+        order = case["order"]
+        ticket = case["ticket"]
+        rows["customers"].append(
+            (case["customer_id"], customer["email"], customer["full_name"])
+        )
+        rows["orders"].append(
+            (
+                case["order_id"],
+                case["customer_id"],
+                order["product_type"],
+                _canonical_date(order["purchase_date"]),
+                order["item_status"],
+                _canonical_money(order["amount_paid"]),
+                _canonical_money(order["prior_refund_total"]),
+                order["currency"],
+            )
+        )
+        rows["tickets"].append(
+            (
+                case["ticket_id"],
+                case["customer_id"],
+                ticket["raw_text"],
+                ticket["sanitized_text"],
+                ticket["refund_reason"],
+                _canonical_money(ticket["requested_amount"]),
+                ticket["currency"],
+                "new",
+                int(bool(ticket["injection_flag"])),
+            )
+        )
+        workflow = (case["trace_id"], case["ticket_id"], fixture["policy_version"])
+        if phase == "baseline":
+            workflow += ("running", "triage_agent", None)
+        rows["workflow_runs"].append(workflow)
+    return {table: sorted(values, key=lambda row: row[0]) for table, values in rows.items()}
+
+
+def canonical_root_fingerprint(fixture: dict[str, Any], *, phase: str = "baseline") -> str:
+    payload = expected_canonical_root_rows(fixture, phase=phase)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def verify_canonical_root_content(
+    cursor: Any,
+    fixture: dict[str, Any],
+    *,
+    phase: str = "baseline",
+) -> str:
+    """Fail closed if any seeded customer/order/ticket/workflow fact drifted."""
+
+    expected = expected_canonical_root_rows(fixture, phase=phase)
+    queries = {
+        "customers": """
+            SELECT customer_id, email, full_name
+            FROM customers ORDER BY customer_id
+        """,
+        "orders": """
+            SELECT order_id, customer_id, product_type, purchase_date, item_status,
+                   amount_paid, prior_refund_total, currency
+            FROM orders ORDER BY order_id
+        """,
+        "tickets": """
+            SELECT ticket_id, customer_id, raw_text, sanitized_text, refund_reason,
+                   requested_amount, currency, status, injection_flag
+            FROM tickets ORDER BY ticket_id
+        """,
+        "workflow_runs": (
+            """
+            SELECT trace_id, ticket_id, policy_version, status, current_agent, completed_at
+            FROM workflow_runs ORDER BY trace_id
+            """
+            if phase == "baseline"
+            else """
+            SELECT trace_id, ticket_id, policy_version
+            FROM workflow_runs ORDER BY trace_id
+            """
+        ),
+    }
+    for table, query in queries.items():
+        cursor.execute(query)
+        actual = [
+            _normalize_canonical_root_row(table, tuple(row), phase=phase)
+            for row in cursor.fetchall()
+        ]
+        if actual != expected[table]:
+            expected_by_id = {str(row[0]): row for row in expected[table]}
+            actual_by_id = {str(row[0]): row for row in actual}
+            changed = sorted(
+                identity
+                for identity in expected_by_id.keys() & actual_by_id.keys()
+                if expected_by_id[identity] != actual_by_id[identity]
+            )
+            raise AdminError(
+                f"{table} canonical root content differs; "
+                f"missing={sorted(expected_by_id.keys() - actual_by_id.keys())}, "
+                f"unexpected={sorted(actual_by_id.keys() - expected_by_id.keys())}, "
+                f"changed={changed}"
+            )
+    return canonical_root_fingerprint(fixture, phase=phase)
+
+
+def _normalize_canonical_root_row(
+    table: str,
+    row: tuple[Any, ...],
+    *,
+    phase: str,
+) -> tuple[Any, ...]:
+    if table == "orders":
+        return (
+            str(row[0]),
+            str(row[1]),
+            row[2],
+            _canonical_date(row[3]),
+            row[4],
+            _canonical_money(row[5]),
+            _canonical_money(row[6]),
+            row[7],
+        )
+    if table == "tickets":
+        return (
+            str(row[0]),
+            str(row[1]),
+            row[2],
+            row[3],
+            row[4],
+            _canonical_money(row[5]),
+            row[6],
+            row[7],
+            int(bool(row[8])),
+        )
+    if table == "workflow_runs":
+        normalized: tuple[Any, ...] = (str(row[0]), str(row[1]), row[2])
+        if phase == "baseline":
+            normalized += (row[3], row[4], row[5])
+        return normalized
+    return tuple(str(value) if index < 1 else value for index, value in enumerate(row))
+
+
+def _canonical_money(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return format(Decimal(str(value)).quantize(Decimal("0.01")), "f")
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise AdminError(f"Invalid canonical monetary value: {value!r}") from error
+
+
+def _canonical_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()[:10]
+    return str(value).strip()[:10]
+
+
 def verify_database(
     connection: Any,
     fixture: dict[str, Any],
@@ -510,6 +696,8 @@ def verify_database(
                     f"{table} IDs differ; missing={sorted(expected_ids[table] - actual)}, "
                     f"unexpected={sorted(actual - expected_ids[table])}"
                 )
+
+        root_fingerprint = verify_canonical_root_content(cursor, fixture, phase=phase)
 
         for table in OUTPUT_TABLES:
             _assert_allowed_traces(_trace_rows(cursor, table), table=table)
@@ -548,7 +736,12 @@ def verify_database(
             orphans[name] = int(cursor.fetchone()[0])
         if any(orphans.values()):
             raise AdminError(f"Foreign-key orphan checks failed: {orphans}")
-        return {"phase": phase, "counts": counts, "orphans": orphans}
+        return {
+            "phase": phase,
+            "counts": counts,
+            "orphans": orphans,
+            "canonical_root_fingerprint": root_fingerprint,
+        }
     finally:
         cursor.close()
 

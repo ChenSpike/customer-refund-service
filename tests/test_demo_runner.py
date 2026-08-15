@@ -43,6 +43,12 @@ class _Graph:
             "trace_id": case.trace_id,
             "ticket_id": case.ticket_id,
             "user_id": case.customer_id,
+            "message": state["message"],
+            "order_resolution_source": (
+                "trusted_ui_selection"
+                if state.get("requested_order_id")
+                else "azure_tool_call"
+            ),
             "order_lookup_result": {"order_id": case.order_id},
             "triage_governance_result": {
                 "status": "block" if case.trace_id in {"demo12", "demo13"} else "allow"
@@ -113,8 +119,28 @@ def test_live_run_reuses_seeded_identity_and_selected_order_id(monkeypatch) -> N
     assert "order-demo99" in graph.inputs[0]["message"]
     assert graph.inputs[0]["requested_order_id"] == "order-demo18"
     assert graph.inputs[0]["request_context"]["selected_order_id"] == "order-demo18"
+    assert first["order_resolution_source"] == "trusted_ui_selection"
     assert graph.evaluation_dates == ["2026-07-01", "2026-07-01"]
     assert "POLICY_EVALUATION_DATE" not in os.environ
+
+
+def test_live_run_without_fixture_override_requires_azure_order_resolution() -> None:
+    graph = _Graph()
+    runner = DemoRunner(
+        mode="live",
+        repository=_Repository(),
+        graph=graph,
+        seed_verifier=lambda *_args: None,
+        result_verifier=lambda *_args: {"matched": True},
+    )
+
+    result = runner.run_case("demo01")
+
+    assert result["success"] and result["matched_expectations"]
+    assert "requested_order_id" not in graph.inputs[0]
+    assert "selected_order_id" not in graph.inputs[0]["request_context"]
+    assert result["selected_order_id"] is None
+    assert result["order_resolution_source"] == "azure_tool_call"
 
 
 def test_batch_isolates_case_failure_and_continues() -> None:
@@ -263,6 +289,35 @@ def test_missing_observed_route_and_wrong_policy_decision_cannot_match_manifest(
     assert _matches_expectations(case, actual) is False
 
 
+def test_normalized_result_preserves_observed_message_and_checks_fixture_identity() -> None:
+    case = load_demo_catalog().get("demo01")
+    actual = normalize_graph_state(case, {
+        "trace_id": case.trace_id,
+        "ticket_id": case.ticket_id,
+        "user_id": case.customer_id,
+        "message": "different graph message",
+        "order_resolution_source": "azure_tool_call",
+        "order_lookup_result": {"order_id": case.order_id},
+        "policy_decision": {"decision": "approve"},
+        "policy_persistence_result": {"next_agent": "refund_agent"},
+        "final_outcome": "refund_issued",
+        "workflow_status": "completed",
+        "refund_result": {
+            "status": "success",
+            "order_id": case.order_id,
+            "amount": case.ticket["requested_amount"],
+        },
+        "triage_governance_result": {"status": "allow"},
+        "policy_governance_result": {"status": "allow"},
+        "response_governance_result": {"status": "allow"},
+    })
+
+    assert actual["message"] == "different graph message"
+    assert actual["expected_message"] == case.message
+    assert actual["order_resolution_source"] == "azure_tool_call"
+    assert _matches_expectations(case, actual) is False
+
+
 class _Cursor:
     def __init__(self, *, extra_trace: bool = False, row: dict[str, Any] | None = None) -> None:
         self.extra_trace = extra_trace
@@ -296,18 +351,31 @@ class _Connection:
         self.closed = True
 
 
-def test_seed_verifier_is_read_only_and_checks_exact_root_scope() -> None:
-    case = load_demo_catalog().get("demo04")
-    row = {
+def _clean_seed_row(case):
+    return {
         "trace_id": case.trace_id,
         "ticket_id": case.ticket_id,
-        "customer_id": case.customer_id,
-        "raw_text": case.message,
-        "email": case.customer["email"],
-        "order_id": case.order_id,
+        "policy_version": "v1.0",
         "status": "running",
         "current_agent": "triage_agent",
         "completed_at": None,
+        "customer_id": case.customer_id,
+        "raw_text": case.message,
+        "sanitized_text": case.ticket["sanitized_text"],
+        "refund_reason": case.ticket["refund_reason"],
+        "requested_amount": case.ticket["requested_amount"],
+        "ticket_currency": case.ticket["currency"],
+        "ticket_status": "new",
+        "injection_flag": int(bool(case.ticket["injection_flag"])),
+        "email": case.customer["email"],
+        "full_name": case.customer["full_name"],
+        "order_id": case.order_id,
+        "product_type": case.order["product_type"],
+        "purchase_date": case.order["purchase_date"],
+        "item_status": case.order["item_status"],
+        "amount_paid": case.order["amount_paid"],
+        "prior_refund_total": case.order["prior_refund_total"],
+        "order_currency": case.order["currency"],
         "handoff_count": 0,
         "audit_count": 0,
         "governance_count": 0,
@@ -315,6 +383,11 @@ def test_seed_verifier_is_read_only_and_checks_exact_root_scope() -> None:
         "approval_count": 0,
         "refund_count": 0,
     }
+
+
+def test_seed_verifier_is_read_only_and_checks_exact_root_scope() -> None:
+    case = load_demo_catalog().get("demo04")
+    row = _clean_seed_row(case)
     cursor = _Cursor(row=row)
     connection = _Connection(cursor)
     repository = _Repository()
@@ -330,23 +403,29 @@ def test_seed_verifier_is_read_only_and_checks_exact_root_scope() -> None:
 
 def test_seed_verifier_rejects_dirty_trace_before_graph_invocation() -> None:
     case = load_demo_catalog().get("demo04")
-    row = {
-        "trace_id": case.trace_id,
-        "ticket_id": case.ticket_id,
-        "customer_id": case.customer_id,
-        "raw_text": case.message,
-        "email": case.customer["email"],
-        "order_id": case.order_id,
+    row = _clean_seed_row(case)
+    row.update({
         "status": "completed",
         "current_agent": "completed",
         "completed_at": "2026-08-14 12:00:00",
         "handoff_count": 4,
         "audit_count": 4,
         "governance_count": 2,
-        "policy_review_count": 0,
-        "approval_count": 0,
         "refund_count": 1,
-    }
+    })
+    cursor = _Cursor(row=row)
+    connection = _Connection(cursor)
+    repository = _Repository()
+    repository._connect = lambda: connection
+
+    with pytest.raises(DemoRunError, match="clean demo_cases.json baseline"):
+        verify_seeded_case(repository, load_demo_catalog(), case)
+
+
+def test_seed_verifier_rejects_mutated_order_fact_before_graph_invocation() -> None:
+    case = load_demo_catalog().get("demo04")
+    row = _clean_seed_row(case)
+    row["amount_paid"] = 999.99
     cursor = _Cursor(row=row)
     connection = _Connection(cursor)
     repository = _Repository()

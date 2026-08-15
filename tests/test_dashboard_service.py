@@ -5,10 +5,41 @@ from datetime import datetime, timezone
 import pytest
 
 from dashboard_app.repository import DashboardRepositoryError
-from dashboard_app.service import DashboardDataError, DashboardService, build_case_detail
+from dashboard_app.service import (
+    DashboardDataError,
+    DashboardService,
+    build_case_detail,
+    normalize_approval_row,
+    _latest_handoff,
+)
 
 
 NOW = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def test_latest_handoff_prefers_customer_continuation_on_timestamp_tie() -> None:
+    timestamp = "2026-08-14T12:00:00"
+    rows = [
+        {
+            "handoff_id": "HANDOFF-A",
+            "from_agent": "triage_agent",
+            "created_at": timestamp,
+            "input_json": {
+                "_continuation": {
+                    "type": "customer_followup",
+                    "claim_token": "token",
+                }
+            },
+        },
+        {
+            "handoff_id": "HANDOFF-Z",
+            "from_agent": "triage_agent",
+            "created_at": timestamp,
+            "input_json": {},
+        },
+    ]
+
+    assert _latest_handoff(rows, "triage_agent")["handoff_id"] == "HANDOFF-A"
 
 
 def _bundle(trace_id: str = "demo01") -> dict:
@@ -55,7 +86,21 @@ def _bundle(trace_id: str = "demo01") -> dict:
         "response_result": {
             "final_outcome": "approved",
             "workflow_status": "completed",
-            "response": {"body": "Your refund was processed."},
+            "response": {
+                "channel": "email",
+                "subject_line": "Your refund update",
+                "body": "Your refund was processed.",
+                "tone": "empathetic",
+                "word_count": 4,
+            },
+            "content_checks": {
+                "decision_reflected": True,
+                "missing_info_requested": True,
+                "safe_summary_reflected": True,
+                "outcome_anchor_reflected": True,
+                "pii_fields_detected": [],
+                "forbidden_phrases": [],
+            },
         },
         "response_handoff": "end",
     }
@@ -163,6 +208,9 @@ def test_case_detail_reads_nested_triage_and_canonical_policy_output():
     assert detail["request"]["requestedAmount"] == 80.0
     assert detail["reason"] == "damaged"
     assert detail["order"]["orderId"] == "ORD-DEMO-01"
+    assert detail["customerResponse"]["body"] == "Your refund was processed."
+    assert detail["customerResponse"]["subjectLine"] == "Your refund update"
+    assert detail["customerResponse"]["contentChecks"]["decision_reflected"] is True
     assert detail["policy"]["decision"]["type"] == "Approve"
     assert detail["refund"]["transactionId"] == "RF-DEMO-01"
     assert detail["readOnly"] is True
@@ -211,9 +259,59 @@ def test_governance_block_with_typed_pending_approval_is_quarantined():
     assert detail["status"] == "quarantined"
     assert detail["riskTag"] == {"code": "ASI07", "label": "Data Leakage"}
     assert detail["pendingApprovalId"] == "POL-APP-007"
+    assert detail["approvals"][0]["requested_amount"] == 80
+    assert detail["approvals"][0]["amount_paid"] == 80
+    assert detail["approvals"][0]["remaining_refundable"] == 80
     assert detail["governance"]["triggerScore"] == 0.91
     assert detail["pipeline"][4]["state"] == "blocked"
     assert detail["pipeline"][5]["state"] == "current"
+
+
+def test_pending_approval_financial_context_uses_ticket_and_order_fallbacks():
+    approval = normalize_approval_row(
+        {
+            "approval_id": "approval-demo20",
+            "trace_id": "demo20",
+            "status": "pending",
+            "amount_requested": None,
+            "ticket_requested_amount": 210,
+            "ticket_currency": "USD",
+            "order_amount_paid": 210,
+            "order_prior_refund_total": 25,
+            "order_currency": "USD",
+            "notes": None,
+            "policy_ids_json": None,
+        }
+    )
+
+    assert approval["requested_amount"] == 210
+    assert approval["amount_paid"] == 210
+    assert approval["prior_refund_total"] == 25
+    assert approval["remaining_refundable"] == 185
+    assert approval["currency"] == "USD"
+    assert "ticket_requested_amount" not in approval
+    assert "order_amount_paid" not in approval
+
+
+def test_pending_approval_requested_amount_precedes_ticket_fallback():
+    approval = normalize_approval_row(
+        {
+            "approval_id": "approval-demo08",
+            "trace_id": "demo08",
+            "status": "pending",
+            "amount_requested": 180,
+            "ticket_requested_amount": 120,
+            "ticket_currency": "USD",
+            "order_amount_paid": 120,
+            "order_prior_refund_total": 0,
+            "order_currency": "USD",
+            "notes": None,
+            "policy_ids_json": None,
+        }
+    )
+
+    assert approval["requested_amount"] == 180
+    assert approval["remaining_refundable"] == 120
 
 
 def test_service_metrics_and_read_endpoints_use_only_fake_repository():

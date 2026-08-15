@@ -44,7 +44,12 @@ def get_order_fixture(
         (
             item
             for item in catalog.cases
-            if normalized in {item.order_id.lower(), item.selected_order_id.lower()}
+            if normalized
+            in {
+                value.lower()
+                for value in (item.order_id, item.selected_order_id)
+                if value is not None
+            }
         ),
         None,
     )

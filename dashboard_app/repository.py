@@ -281,8 +281,18 @@ class DashboardRepository:
                   g.offending_content AS governance_offending_content,
                   p.review_type AS policy_review_type,
                   p.detail AS policy_review_detail,
-                  p.policy_ids_json AS policy_ids_json
+                  p.policy_ids_json AS policy_ids_json,
+                  t.requested_amount AS ticket_requested_amount,
+                  t.currency AS ticket_currency,
+                  o.amount_paid AS order_amount_paid,
+                  o.prior_refund_total AS order_prior_refund_total,
+                  o.currency AS order_currency
                 FROM human_approvals a
+                JOIN workflow_runs w ON w.trace_id = a.trace_id
+                JOIN tickets t ON t.ticket_id = w.ticket_id
+                LEFT JOIN orders o
+                  ON o.order_id = CONCAT('order-', a.trace_id)
+                 AND o.customer_id = t.customer_id
                 LEFT JOIN governance_events g
                   ON a.triggering_event_type = 'governance'
                  AND a.triggering_event_id = g.event_id
@@ -309,12 +319,21 @@ class DashboardRepository:
         }
         if table not in allowed:
             raise ValueError(f"Unsupported dashboard table: {table}")
+        primary_key = {
+            "agent_handoffs": "handoff_id",
+            "governance_events": "event_id",
+            "human_approvals": "approval_id",
+            "refund_transactions": "transaction_id",
+            "audit_log": "log_id",
+            "policy_review_events": "policy_review_event_id",
+        }[table]
         grouped = {trace_id: [] for trace_id in trace_ids}
         if not trace_ids:
             return grouped
         placeholders = ",".join(["%s"] * len(trace_ids))
         cursor.execute(
-            f"SELECT * FROM {table} WHERE trace_id IN ({placeholders}) ORDER BY trace_id, created_at",
+            f"SELECT * FROM {table} WHERE trace_id IN ({placeholders}) "
+            f"ORDER BY trace_id, created_at, {primary_key}",
             tuple(trace_ids),
         )
         for raw in cursor.fetchall():
@@ -340,9 +359,18 @@ class DashboardRepository:
         }
         if table not in allowed:
             raise ValueError(f"Unsupported dashboard table: {table}")
+        primary_key = {
+            "agent_handoffs": "handoff_id",
+            "governance_events": "event_id",
+            "human_approvals": "approval_id",
+            "refund_transactions": "transaction_id",
+            "audit_log": "log_id",
+            "policy_review_events": "policy_review_event_id",
+        }[table]
         direction = "DESC" if descending else "ASC"
         cursor.execute(
-            f"SELECT * FROM {table} WHERE trace_id = %s ORDER BY created_at {direction}",
+            f"SELECT * FROM {table} WHERE trace_id = %s "
+            f"ORDER BY created_at {direction}, {primary_key} {direction}",
             (trace_id,),
         )
         return [dict(row) for row in cursor.fetchall()]

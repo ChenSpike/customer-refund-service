@@ -209,9 +209,15 @@ def verify_seeded_case(repository: Any, catalog: DemoCatalog, case: DemoCase) ->
             """
             SELECT
               workflow.trace_id, workflow.ticket_id,
-              ticket.customer_id, ticket.raw_text,
-              customer.email, orders.order_id,
-              workflow.status, workflow.current_agent, workflow.completed_at,
+              workflow.policy_version, workflow.status,
+              workflow.current_agent, workflow.completed_at,
+              ticket.customer_id, ticket.raw_text, ticket.sanitized_text,
+              ticket.refund_reason, ticket.requested_amount, ticket.currency AS ticket_currency,
+              ticket.status AS ticket_status, ticket.injection_flag,
+              customer.email, customer.full_name,
+              orders.order_id, orders.product_type, orders.purchase_date,
+              orders.item_status, orders.amount_paid, orders.prior_refund_total,
+              orders.currency AS order_currency,
               (SELECT COUNT(*) FROM agent_handoffs h WHERE h.trace_id = workflow.trace_id) AS handoff_count,
               (SELECT COUNT(*) FROM audit_log a WHERE a.trace_id = workflow.trace_id) AS audit_count,
               (SELECT COUNT(*) FROM governance_events g WHERE g.trace_id = workflow.trace_id) AS governance_count,
@@ -232,13 +238,27 @@ def verify_seeded_case(repository: Any, catalog: DemoCatalog, case: DemoCase) ->
         expected = {
             "trace_id": case.trace_id,
             "ticket_id": case.ticket_id,
-            "customer_id": case.customer_id,
-            "raw_text": case.message,
-            "email": case.customer["email"],
-            "order_id": case.order_id,
+            "policy_version": catalog.policy_version,
             "status": "running",
             "current_agent": "triage_agent",
             "completed_at": None,
+            "customer_id": case.customer_id,
+            "raw_text": case.message,
+            "sanitized_text": case.ticket["sanitized_text"],
+            "refund_reason": case.ticket["refund_reason"],
+            "requested_amount": _canonical_seed_money(case.ticket["requested_amount"]),
+            "ticket_currency": case.ticket["currency"],
+            "ticket_status": "new",
+            "injection_flag": int(bool(case.ticket["injection_flag"])),
+            "email": case.customer["email"],
+            "full_name": case.customer["full_name"],
+            "order_id": case.order_id,
+            "product_type": case.order["product_type"],
+            "purchase_date": str(case.order["purchase_date"])[:10],
+            "item_status": case.order["item_status"],
+            "amount_paid": _canonical_seed_money(case.order["amount_paid"]),
+            "prior_refund_total": _canonical_seed_money(case.order["prior_refund_total"]),
+            "order_currency": case.order["currency"],
             "handoff_count": 0,
             "audit_count": 0,
             "governance_count": 0,
@@ -247,7 +267,7 @@ def verify_seeded_case(repository: Any, catalog: DemoCatalog, case: DemoCase) ->
             "refund_count": 0,
         }
         actual = {
-            key: _row_value(row, key, index)
+            key: _normalize_seeded_value(key, _row_value(row, key, index))
             for index, key in enumerate(expected)
         }
         if actual != expected:
@@ -295,7 +315,9 @@ def normalize_graph_state(case: DemoCase, state: dict[str, Any]) -> dict[str, An
         "customer_id": state.get("user_id"),
         "order_id": order_lookup.get("order_id"),
         "selected_order_id": case.selected_order_id,
-        "message": case.message,
+        "message": state.get("message"),
+        "expected_message": case.message,
+        "order_resolution_source": state.get("order_resolution_source"),
         "route": route,
         "policy_decision": policy_decision.get("decision"),
         "final_outcome": final_outcome,
@@ -305,6 +327,7 @@ def normalize_graph_state(case: DemoCase, state: dict[str, Any]) -> dict[str, An
             or response_result.get("body")
             or "(no response generated)"
         ),
+        "response_content_checks": response_result.get("content_checks") or {},
         "governance": {
             "triage": triage_governance.get("status"),
             "policy": policy_governance.get("status"),
@@ -340,6 +363,7 @@ def _matches_expectations(case: DemoCase, actual: dict[str, Any]) -> bool:
         and actual.get("ticket_id") == case.ticket_id
         and actual.get("customer_id") == case.customer_id
         and actual.get("order_id") == case.order_id
+        and actual.get("message") == case.message
     )
     refund_matches = True
     if case.expectations.outcome == "refund_issued":
@@ -511,6 +535,22 @@ def verify_persisted_case(
 
 def _row_value(row: Any, name: str, index: int) -> Any:
     return row.get(name) if isinstance(row, dict) else row[index]
+
+
+def _canonical_seed_money(value: Any) -> str | None:
+    if value is None:
+        return None
+    return f"{float(value):.2f}"
+
+
+def _normalize_seeded_value(name: str, value: Any) -> Any:
+    if name in {"requested_amount", "amount_paid", "prior_refund_total"}:
+        return _canonical_seed_money(value)
+    if name == "purchase_date":
+        return str(value)[:10] if value is not None else None
+    if name == "injection_flag":
+        return int(bool(value))
+    return value
 
 
 def _milliseconds(seconds: float) -> float:

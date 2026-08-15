@@ -34,6 +34,7 @@ class AppState(TypedDict, total=False):
     human_review_required: bool
     final_outcome: str
     requested_order_id: str
+    order_resolution_source: str
     clarification_question: str
     review_trigger_stage: str
     review_trigger_reason: str

@@ -125,6 +125,23 @@ export default function CaseDetail({ traceId, onBack, onChanged }) {
               </div>
             </div>
           </div>
+
+          {detail.customerResponse?.body && (
+            <div style={card}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Customer Response</div>
+              {detail.customerResponse.subjectLine && (
+                <div style={{ fontSize: 11.5, color: colors.textFaint, marginBottom: 10 }}>
+                  Subject: {detail.customerResponse.subjectLine}
+                </div>
+              )}
+              <div style={{ fontSize: 13, color: 'oklch(0.25 0.02 260)', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                {detail.customerResponse.body}
+              </div>
+              <div style={{ marginTop: 12, fontSize: 11.5, color: colors.textFaint }}>
+                Semantic checks: {responseChecksPassed(detail.customerResponse.contentChecks) ? 'passed' : 'attention required'}
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18, minWidth: 0 }}>
@@ -233,6 +250,20 @@ export default function CaseDetail({ traceId, onBack, onChanged }) {
       </div>
     </div>
   );
+}
+
+function responseChecksPassed(checks = {}) {
+  const required = [
+    'decision_reflected',
+    'missing_info_requested',
+    'safe_summary_reflected',
+    'outcome_anchor_reflected',
+  ];
+  return required.every((name) => checks[name] === true)
+    && Array.isArray(checks.pii_fields_detected)
+    && checks.pii_fields_detected.length === 0
+    && Array.isArray(checks.forbidden_phrases)
+    && checks.forbidden_phrases.length === 0;
 }
 
 function BackButton({ onBack }) {

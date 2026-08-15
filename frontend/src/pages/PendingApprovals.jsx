@@ -68,9 +68,9 @@ export default function PendingApprovals({ onSelectCase, onChanged }) {
             </div>
 
             <div style={{ marginTop: 15, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <Field label="Requested" value={`$${money(approval.amount_requested)}`} mono />
+              <Field label="Requested" value={`${approval.currency || 'USD'} $${money(approval.requested_amount)}`} mono />
+              <Field label="Remaining" value={`${approval.currency || 'USD'} $${money(approval.remaining_refundable)}`} mono />
               <Field label="Trigger" value={approval.trigger?.type || approval.triggering_event_type} />
-              <Field label="Stage" value={approval.review_stage || approval.trigger?.reviewType || '-'} />
               <Field label="Approve route" value={approval.approved_next_agent || '-'} mono />
             </div>
             {approval.reason && (
@@ -85,7 +85,7 @@ export default function PendingApprovals({ onSelectCase, onChanged }) {
             <ApprovalResolutionForm
               traceId={approval.trace_id}
               approval={approval}
-              requestedAmount={approval.amount_requested}
+              requestedAmount={approval.requested_amount}
               onResolved={handleResolved}
             />
           </section>

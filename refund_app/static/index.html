@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
 <title>Final Refund Workflow Demo</title>
 <style>
   :root { color-scheme: light dark; }
@@ -20,8 +21,13 @@
     }
     .muted, th { color: #aeb4bd !important; }
     td, th { border-color: #3a3b40 !important; }
+    .notice { background: #1e293b !important; color: #e2e8f0 !important; }
+    .notice.warning { background: #431407 !important; color: #fed7aa !important; }
+    .batch-pass { color: #86efac !important; }
+    .batch-fail, .error { color: #fca5a5 !important; }
+    .toplinks a { color: #60a5fa !important; }
   }
-  main { width: 100%; max-width: 760px; }
+  main { width: 100%; max-width: 960px; }
   h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
   h2 { font-size: 1rem; margin: 0 0 .8rem; }
   .muted { color: #6b7280; font-size: .85rem; }
@@ -56,6 +62,16 @@
   .b-manual_review, .b-pending_human { background: #ffedd5; color: #9a3412; }
   .b-neutral { background: rgba(127,127,127,.15); color: inherit; }
   .modebar { font-size: .75rem; text-align: right; margin-bottom: .5rem; }
+  .toplinks { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+  .toplinks a { color: #2563eb; font-weight: 600; text-decoration: none; }
+  .actions { display: flex; gap: .65rem; flex-wrap: wrap; }
+  .followup { margin-top: 1rem; padding: .8rem; border: 1px solid #f59e0b; border-radius: 8px; }
+  .followup p { margin: 0 0 .65rem; }
+  .secondary { background: #475569; }
+  .notice { padding: .7rem .8rem; border-radius: 8px; background: #eef2ff; margin: .7rem 0 1rem; }
+  .notice.warning { background: #fff7ed; color: #9a3412; }
+  .batch-pass { color: #166534; font-weight: 700; }
+  .batch-fail { color: #991b1b; font-weight: 700; }
   .outcome-line {
     display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem;
   }
@@ -72,9 +88,13 @@
 </head>
 <body>
 <main>
-  <div class="modebar"><span id="mode" class="badge b-neutral">Loading…</span></div>
+  <div class="toplinks">
+    <a id="dashboard-link" href="http://127.0.0.1:3000/" target="_blank" rel="noreferrer">Open operations dashboard →</a>
+    <div class="modebar"><span id="mode" class="badge b-neutral">Loading…</span></div>
+  </div>
   <h1>Final Refund Workflow Demo</h1>
-  <p class="muted subtitle">Run one of the 20 seeded end-to-end cases without creating a new root case.</p>
+  <p class="muted subtitle">Enter the real Triage workflow through the public HTTP API and keep the root corpus fixed at demo01–demo20.</p>
+  <div id="readiness" class="notice">Checking execution readiness…</div>
 
   <section class="card" aria-labelledby="case-heading">
     <h2 id="case-heading">Select a demo case</h2>
@@ -94,8 +114,26 @@
       <label for="selected-message">Canonical customer message</label>
       <textarea id="selected-message" readonly></textarea>
     </div>
-    <button id="send" disabled>Run selected case</button>
+    <div class="actions">
+      <button id="send" disabled>Run selected case</button>
+      <button id="run-all" class="secondary" disabled>Run all 20 cases</button>
+    </div>
+    <div id="followup-panel" class="followup hidden" aria-live="polite">
+      <strong>Customer follow-up available</strong>
+      <p id="followup-message" class="muted"></p>
+      <button id="send-followup" disabled>Continue customer → Triage</button>
+      <p id="followup-note" class="muted"></p>
+    </div>
     <p id="load-error" class="error hidden" role="alert"></p>
+  </section>
+
+  <section id="batch" class="card hidden" aria-live="polite">
+    <h2>20-case HTTP run</h2>
+    <p id="batch-summary" class="muted">Not started.</p>
+    <table aria-label="Twenty case execution summary">
+      <thead><tr><th>Case</th><th>HTTP workflow</th><th>Outcome</th><th>Status</th><th>Dashboard</th></tr></thead>
+      <tbody id="batch-results"></tbody>
+    </table>
   </section>
 
   <section id="result" class="card hidden" aria-live="polite">
@@ -134,6 +172,10 @@
 const byId = (id) => document.getElementById(id);
 const allowedCaseIds = Array.from({ length: 20 }, (_, index) => `demo${String(index + 1).padStart(2, "0")}`);
 const casesById = new Map();
+const latestResults = new Map();
+let healthState = null;
+let batchRunning = false;
+let healthRefreshTimer = null;
 
 function badgeClass(value) {
   const known = new Set([
@@ -166,9 +208,51 @@ function renderSelection() {
   const item = selectedCase();
   if (!item) return;
   byId("selected-customer").textContent = item.customer_id;
-  byId("selected-order").textContent = item.selected_order_id;
+  byId("selected-order").textContent = item.selected_order_id || "Triage extracts from message";
   byId("selected-ticket").textContent = item.ticket_id;
   byId("selected-message").value = item.message;
+  byId("dashboard-link").href = dashboardUrl(item.case_id);
+  renderFollowupControl();
+}
+
+function renderFollowupControl() {
+  const item = selectedCase();
+  const panel = byId("followup-panel");
+  const result = item ? latestResults.get(item.case_id) : null;
+  const persisted = item ? healthState?.case_states?.[item.case_id] : null;
+  const available = Boolean(item?.follow_up);
+  panel.classList.toggle("hidden", !available);
+  if (!available) return;
+  byId("followup-message").textContent = item.follow_up.message;
+  const isWaiting = result?.workflow_status === "waiting_user"
+    || (persisted?.workflow_status === "waiting_user"
+      && persisted?.current_agent === "triage_agent");
+  const isCompleted = result?.follow_up?.status === "completed"
+    || result?.follow_up?.status === "already_completed"
+    || (persisted?.workflow_status === "completed"
+      && persisted?.current_agent === "completed");
+  const isRecoverable = persisted?.followup_status === "retryable";
+  const isInProgress = persisted?.followup_status === "in_progress";
+  const live = healthState?.mode === "live";
+  byId("send-followup").disabled = batchRunning
+    || !(isWaiting || isCompleted || isRecoverable)
+    || !live;
+  byId("send-followup").textContent = isCompleted
+    ? "Replay exact follow-up"
+    : isRecoverable
+      ? "Retry/recover follow-up"
+      : "Continue customer → Triage";
+  byId("followup-note").textContent = !live
+    ? "A real continuation requires LIVE mode and GCP:final."
+    : isCompleted
+      ? "The continuation is complete; replay returns the immutable stored result without rerunning the graph."
+    : isRecoverable
+      ? "A prior continuation lease expired; retry safely restores the first cycle before resuming."
+      : isInProgress
+        ? `Continuation is in progress. Recovery unlocks automatically in ${persisted.followup_retry_after_seconds}s if it does not finish.`
+        : isWaiting
+          ? "The persisted workflow is waiting at Triage; this submits the canonical missing facts even after a page reload."
+          : "Run this case to its waiting_user state before continuing it.";
 }
 
 async function loadHealth() {
@@ -176,15 +260,57 @@ async function loadHealth() {
     const response = await fetch("/api/health");
     const health = await response.json();
     if (!response.ok) throw new Error(health.detail || `HTTP ${response.status}`);
-    byId("mode").textContent = `${health.mode} · db:${health.database}`;
+    healthState = health;
+    if (healthRefreshTimer) clearTimeout(healthRefreshTimer);
+    const retryDelays = Object.values(health.case_states || {})
+      .filter((state) => state?.followup_status === "in_progress")
+      .map((state) => Number(state.followup_retry_after_seconds || 0))
+      .filter((seconds) => seconds > 0);
+    if (retryDelays.length) {
+      healthRefreshTimer = setTimeout(
+        loadHealth,
+        (Math.min(...retryDelays) + 1) * 1000
+      );
+    }
+    const live = health.mode === "live";
+    byId("mode").textContent = live
+      ? `LIVE · GCP:${health.database}`
+      : "OFFLINE SIMULATION · no Azure/DB";
+    const readiness = byId("readiness");
+    readiness.textContent = health.execution_notice || "Execution status available.";
+    readiness.className = `notice ${live && !health.ready_for_full_run ? "warning" : ""}`;
+    if (live && !health.ready_for_full_run) {
+      readiness.textContent += ` (${health.clean_case_count || 0}/20 cases are clean). Run the guarded db.admin reset before rerunning.`;
+    }
+    updateRunControls();
   } catch (_error) {
+    if (healthRefreshTimer) clearTimeout(healthRefreshTimer);
+    healthRefreshTimer = null;
+    healthState = null;
     byId("mode").textContent = "health unavailable";
+    byId("readiness").textContent = "The workflow health check failed; execution is disabled.";
+    byId("readiness").className = "notice warning";
+    updateRunControls();
   }
+}
+
+function cleanCaseIds() {
+  return new Set(Array.isArray(healthState?.clean_case_ids) ? healthState.clean_case_ids : []);
+}
+
+function updateRunControls() {
+  const item = selectedCase();
+  const clean = cleanCaseIds();
+  const runnableSelected = Boolean(
+    item && healthState && (healthState.mode === "offline" || clean.has(item.case_id))
+  );
+  byId("send").disabled = batchRunning || !runnableSelected;
+  byId("run-all").disabled = batchRunning || !healthState?.ready_for_full_run || casesById.size !== 20;
+  renderFollowupControl();
 }
 
 async function loadCases() {
   const select = byId("case-select");
-  const send = byId("send");
   try {
     const response = await fetch("/api/cases");
     const payload = await response.json();
@@ -204,8 +330,8 @@ async function loadCases() {
     }
     byId("evaluation-date").textContent = payload.evaluation_date;
     select.disabled = false;
-    send.disabled = false;
     renderSelection();
+    updateRunControls();
   } catch (error) {
     select.replaceChildren();
     const option = document.createElement("option");
@@ -253,7 +379,56 @@ function renderResult(data, expected) {
   }
 }
 
-byId("case-select").addEventListener("change", renderSelection);
+async function executeFollowup(item) {
+  const { expectations: _expectations, ...request } = item.follow_up;
+  const response = await fetch(`/api/refund/${encodeURIComponent(item.case_id)}/follow-up`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || `HTTP ${response.status}`);
+  }
+  if (data.execution_boundary?.entrypoint !== "refund_followup_http_api") {
+    throw new Error("The response did not prove the public customer-follow-up boundary.");
+  }
+  if (!data.success || !data.matched_expectations || data.persistence?.matched !== true) {
+    throw new Error("Customer follow-up did not prove the persisted terminal workflow.");
+  }
+  return data;
+}
+
+async function executeCase(caseId) {
+  const response = await fetch("/api/refund", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ case_id: caseId }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const detail = typeof data.detail === "string"
+      ? data.detail
+      : `${data.error?.type || "HTTPError"}: ${data.error?.message || `HTTP ${response.status}`}`;
+    throw new Error(detail);
+  }
+  if (data.execution_boundary?.entrypoint !== "refund_http_api") {
+    throw new Error("The response did not prove the public refund HTTP boundary.");
+  }
+  if (!data.success || !data.matched_expectations) {
+    throw new Error("Workflow completed but failed the strict acceptance contract.");
+  }
+  return data;
+}
+
+function dashboardUrl(caseId) {
+  return `http://127.0.0.1:3000/?trace=${encodeURIComponent(caseId)}`;
+}
+
+byId("case-select").addEventListener("change", () => {
+  renderSelection();
+  updateRunControls();
+});
 byId("send").addEventListener("click", async () => {
   const item = selectedCase();
   if (!item) return;
@@ -262,21 +437,86 @@ byId("send").addEventListener("click", async () => {
   button.textContent = "Running…";
   clearError(byId("run-error"));
   try {
-    const caseId = item.case_id;
-    const response = await fetch("/api/refund", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ case_id: caseId }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+    const data = await executeCase(item.case_id);
+    latestResults.set(item.case_id, data);
     renderResult(data, item.expectations);
+    byId("dashboard-link").href = dashboardUrl(item.case_id);
   } catch (error) {
     byId("result").classList.remove("hidden");
     showError(byId("run-error"), `Request failed: ${error.message || error}`);
   } finally {
-    button.disabled = false;
     button.textContent = "Run selected case";
+    await loadHealth();
+  }
+});
+
+byId("send-followup").addEventListener("click", async () => {
+  const item = selectedCase();
+  if (!item?.follow_up) return;
+  const button = byId("send-followup");
+  button.disabled = true;
+  button.textContent = "Continuing…";
+  clearError(byId("run-error"));
+  try {
+    const data = await executeFollowup(item);
+    latestResults.set(item.case_id, data);
+    renderResult(data, item.follow_up.expectations);
+    byId("dashboard-link").href = dashboardUrl(item.case_id);
+  } catch (error) {
+    byId("result").classList.remove("hidden");
+    showError(byId("run-error"), `Follow-up failed: ${error.message || error}`);
+  } finally {
+    await loadHealth();
+    renderFollowupControl();
+  }
+});
+
+byId("run-all").addEventListener("click", async () => {
+  batchRunning = true;
+  updateRunControls();
+  byId("batch").classList.remove("hidden");
+  const body = byId("batch-results");
+  body.replaceChildren();
+  let passed = 0;
+  const started = performance.now();
+  try {
+    for (const [index, caseId] of allowedCaseIds.entries()) {
+      byId("batch-summary").textContent = `Running ${caseId} (${index + 1}/20)…`;
+      const row = document.createElement("tr");
+      for (const value of [caseId, "running", "—", "—", "—"]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      }
+      body.appendChild(row);
+      try {
+        const data = await executeCase(caseId);
+        latestResults.set(caseId, data);
+        passed += 1;
+        row.children[1].textContent = "PASS";
+        row.children[1].className = "batch-pass";
+        row.children[2].textContent = data.final_outcome;
+        row.children[3].textContent = data.workflow_status;
+        const link = document.createElement("a");
+        link.href = dashboardUrl(caseId);
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = "Open case";
+        row.children[4].replaceChildren(link);
+        renderResult(data, casesById.get(caseId).expectations);
+      } catch (error) {
+        row.children[1].textContent = "FAIL";
+        row.children[1].className = "batch-fail";
+        row.children[2].textContent = error.message || String(error);
+        break;
+      }
+    }
+  } finally {
+    const elapsedSeconds = ((performance.now() - started) / 1000).toFixed(1);
+    byId("batch-summary").textContent = `${passed}/20 passed through the refund HTTP API in ${elapsedSeconds}s.`;
+    byId("batch-summary").className = passed === 20 ? "batch-pass" : "batch-fail";
+    batchRunning = false;
+    await loadHealth();
   }
 });
 

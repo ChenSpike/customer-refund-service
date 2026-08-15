@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './App.css';
-import { listCases, getHealth } from './api';
+import { getHealth, getPendingApprovals, listCases } from './api';
 import { colors, navButtonStyle } from './theme';
 import Overview from './pages/Overview';
 import CaseDetail from './pages/CaseDetail';
@@ -16,6 +16,22 @@ const NAV_ITEMS = [
   { key: 'audit', label: 'Audit Log', icon: AuditIcon },
   { key: 'metrics', label: 'Metrics', icon: MetricsIcon },
 ];
+
+const DEMO_TRACE = /^demo(?:0[1-9]|1[0-9]|20)$/;
+
+function traceFromLocation() {
+  if (typeof window === 'undefined') return null;
+  const traceId = new URLSearchParams(window.location.search).get('trace');
+  return DEMO_TRACE.test(traceId || '') ? traceId : null;
+}
+
+function replaceTraceQuery(traceId) {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (traceId) url.searchParams.set('trace', traceId);
+  else url.searchParams.delete('trace');
+  window.history.replaceState({}, '', url);
+}
 
 function OverviewIcon(props) {
   return (
@@ -65,13 +81,14 @@ function MetricsIcon(props) {
 
 function App() {
   const [activeNav, setActiveNav] = useState('overview');
-  const [selectedTraceId, setSelectedTraceId] = useState(null);
+  const [selectedTraceId, setSelectedTraceId] = useState(traceFromLocation);
   const [previewTraceId, setPreviewTraceId] = useState(null);
   const [filter, setFilter] = useState('all');
   const [cases, setCases] = useState([]);
   const [loading, setLoading] = useState(true);
   const [caseError, setCaseError] = useState(null);
   const [health, setHealth] = useState({ status: 'checking' });
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(null);
 
   const loadCases = useCallback(async () => {
     try {
@@ -86,24 +103,60 @@ function App() {
     }
   }, []);
 
+  const loadPendingApprovalCount = useCallback(async () => {
+    try {
+      const response = await getPendingApprovals();
+      setPendingApprovalCount(Array.isArray(response.data) ? response.data.length : 0);
+    } catch (error) {
+      console.error('Error loading pending approval count:', error);
+      setPendingApprovalCount(null);
+    }
+  }, []);
+
+  const refreshDashboard = useCallback(async () => {
+    await Promise.all([loadCases(), loadPendingApprovalCount()]);
+  }, [loadCases, loadPendingApprovalCount]);
+
   useEffect(() => {
     getHealth()
       .then((res) => setHealth(res.data))
       .catch((err) => setHealth(err.response?.data || { status: 'offline' }));
-    loadCases();
-    const interval = setInterval(loadCases, 8000);
+    refreshDashboard();
+    const interval = setInterval(refreshDashboard, 8000);
     return () => clearInterval(interval);
-  }, [loadCases]);
+  }, [refreshDashboard]);
+
+  useEffect(() => {
+    const syncTraceFromUrl = () => {
+      setSelectedTraceId(traceFromLocation());
+      setPreviewTraceId(null);
+    };
+    window.addEventListener('popstate', syncTraceFromUrl);
+    return () => window.removeEventListener('popstate', syncTraceFromUrl);
+  }, []);
+
+  const openCase = (traceId) => {
+    if (!DEMO_TRACE.test(traceId || '')) return;
+    setSelectedTraceId(traceId);
+    setPreviewTraceId(null);
+    replaceTraceQuery(traceId);
+  };
+
+  const closeCase = () => {
+    setSelectedTraceId(null);
+    setPreviewTraceId(null);
+    replaceTraceQuery(null);
+  };
 
   const goNav = (key) => {
     setActiveNav(key);
-    setSelectedTraceId(null);
-    setPreviewTraceId(null);
+    closeCase();
   };
 
-  const pendingCount = cases.filter(
-    (c) => c.status === 'pending_review' || c.status === 'manual_review'
+  const fallbackPendingCount = cases.filter(
+    (caseItem) => caseItem.status === 'manual_review' || caseItem.status === 'quarantined'
   ).length;
+  const pendingCount = pendingApprovalCount ?? fallbackPendingCount;
 
   const showDetail = !!selectedTraceId;
 
@@ -172,8 +225,8 @@ function App() {
         {showDetail ? (
           <CaseDetail
             traceId={selectedTraceId}
-            onBack={() => { setSelectedTraceId(null); setPreviewTraceId(null); }}
-            onChanged={loadCases}
+            onBack={closeCase}
+            onChanged={refreshDashboard}
           />
         ) : (
           <>
@@ -185,18 +238,18 @@ function App() {
                 setFilter={setFilter}
                 previewTraceId={previewTraceId}
                 setPreviewTraceId={setPreviewTraceId}
-                onSelectCase={setSelectedTraceId}
+                onSelectCase={openCase}
                 onGoNav={goNav}
               />
             )}
             {activeNav === 'approvals' && (
               <PendingApprovals
-                onSelectCase={setSelectedTraceId}
-                onChanged={loadCases}
+                onSelectCase={openCase}
+                onChanged={refreshDashboard}
               />
             )}
             {activeNav === 'governance' && (
-              <GovernanceEvents cases={cases} loading={loading} onSelectCase={setSelectedTraceId} />
+              <GovernanceEvents cases={cases} loading={loading} onSelectCase={openCase} />
             )}
             {activeNav === 'audit' && <AuditLog />}
             {activeNav === 'metrics' && <Metrics />}

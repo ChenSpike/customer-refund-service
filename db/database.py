@@ -23,7 +23,7 @@ from agents.policy.models import (
 from governance import GovernanceStatement
 
 
-DEFAULT_DATABASE_NAME = "main_db"
+DEFAULT_DATABASE_NAME = "final"
 # Kept as a compatibility export for callers that import the old constant.
 # Runtime repositories use their own configured database name instead.
 DATABASE_NAME = DEFAULT_DATABASE_NAME
@@ -343,28 +343,53 @@ class GCPRepository:
 		finally:
 			connection.close()
 
-	def save_governance_event_record(self, statement: GovernanceStatement) -> str:
+	def save_governance_event_record(
+		self,
+		statement: GovernanceStatement,
+		*,
+		followup_claim_token: str | None = None,
+	) -> str:
 		connection = self._connect()
 		try:
+			connection.start_transaction()
 			cursor = connection.cursor()
-			cursor.execute(
-				"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = %s ORDER BY created_at",
-				(statement.trace_id, statement.agent),
-			)
-			existing = [row[0] for row in cursor.fetchall()]
-			if len(existing) > 1:
-				raise CloudDatabaseError(f"{statement.trace_id}: multiple governance event rows already exist for {statement.agent}")
-			event_id = existing[0] if existing else self._next_prefixed_id(
+			_require_active_followup_claim(
 				cursor,
-				"governance_events",
-				"event_id",
-				"GOV-STM-",
-				f"{statement.trace_id}:{statement.agent}",
+				trace_id=statement.trace_id,
+				claim_token=followup_claim_token,
 			)
+			if followup_claim_token is None:
+				cursor.execute(
+					"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = %s ORDER BY created_at",
+					(statement.trace_id, statement.agent),
+				)
+				existing = [row[0] for row in cursor.fetchall()]
+				if len(existing) > 1:
+					raise CloudDatabaseError(f"{statement.trace_id}: multiple governance event rows already exist for {statement.agent}")
+				event_id = existing[0] if existing else self._next_prefixed_id(
+					cursor,
+					"governance_events",
+					"event_id",
+					"GOV-STM-",
+					f"{statement.trace_id}:{statement.agent}",
+				)
+			else:
+				# A resumed customer turn is a distinct governance decision.  The
+				# token-derived key also makes a same-attempt retry idempotent.
+				event_id = self._next_prefixed_id(
+					cursor,
+					"governance_events",
+					"event_id",
+					"GOV-STM-",
+					f"{statement.trace_id}:{statement.agent}:customer_followup:{followup_claim_token}",
+				)
 			owasp_category = _statement_owasp_category(statement)
 			trigger_score = _statement_trigger_score(statement)
 			interceptor_action = "block" if statement.status == "block" else "allow"
-			flags_payload = _statement_flags_payload(statement)
+			flags_payload = _with_continuation_marker(
+				_statement_flags_payload(statement),
+				followup_claim_token,
+			)
 			offending_content = _statement_offending_content(statement)
 			cursor.execute(
 				"""
@@ -408,6 +433,10 @@ class GCPRepository:
 				SELECT trace_id, agent, interceptor_action, flags_json, created_at
 				FROM governance_events
 				WHERE trace_id = %s AND agent = %s
+				ORDER BY created_at DESC,
+				         CASE WHEN flags_json LIKE '%%\"_continuation\"%%' THEN 1 ELSE 0 END DESC,
+				         event_id DESC
+				LIMIT 1
 				""",
 				(trace_id, agent),
 			)
@@ -472,20 +501,41 @@ class GCPRepository:
 		precedent_context: PrecedentContext,
 		findings: list[GovernanceFinding],
 		usage: TokenUsage,
+		followup_claim_token: str | None = None,
 	) -> str:
 		trace_id = policy_input.case.trace_id
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
+			_require_active_followup_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=followup_claim_token,
+			)
 			# Lock and reject resolved review history before replacing Policy
 			# handoffs, review events, or governance events.  This keeps a legacy
 			# trigger FK (including an unexpected cascading FK) from deleting a
 			# resolved approval before the rerun safety check can see it.
 			self._assert_policy_approval_history_mutable(cursor, trace_id)
-			handoff_id = self._upsert_handoff(cursor, policy_input, output, usage)
-			policy_event_id = self._persist_policy_review(cursor, output)
-			governance_event_ids = self._persist_governance(cursor, output, findings)
+			handoff_id = self._upsert_handoff(
+				cursor,
+				policy_input,
+				output,
+				usage,
+				followup_claim_token=followup_claim_token,
+			)
+			policy_event_id = self._persist_policy_review(
+				cursor,
+				output,
+				followup_claim_token=followup_claim_token,
+			)
+			governance_event_ids = self._persist_governance(
+				cursor,
+				output,
+				findings,
+				followup_claim_token=followup_claim_token,
+			)
 			self._persist_human_approval(cursor, output, policy_event_id, governance_event_ids)
 			audit_payload = {
 				"handoff_id": handoff_id,
@@ -500,11 +550,13 @@ class GCPRepository:
 					"record_count": len(precedent_context.records),
 				},
 			}
-			cursor.execute(
-				"DELETE FROM audit_log WHERE trace_id = %s "
-				"AND event_type = 'policy_agent_evaluated' AND agent = 'policy_agent'",
-				(trace_id,),
-			)
+			audit_payload = _with_continuation_marker(audit_payload, followup_claim_token)
+			if followup_claim_token is None:
+				cursor.execute(
+					"DELETE FROM audit_log WHERE trace_id = %s "
+					"AND event_type = 'policy_agent_evaluated' AND agent = 'policy_agent'",
+					(trace_id,),
+				)
 			cursor.execute(
 				"""
 				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
@@ -545,12 +597,18 @@ class GCPRepository:
 		audit_event_type: str,
 		workflow_status: str,
 		current_agent: str,
+		followup_claim_token: str | None = None,
 	) -> str:
 		database_status = _database_workflow_status(workflow_status)
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
+			_require_active_followup_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=followup_claim_token,
+			)
 			handoff_id = self._upsert_generic_handoff(
 				cursor,
 				trace_id=trace_id,
@@ -561,13 +619,15 @@ class GCPRepository:
 				output_payload=output_payload,
 				input_tokens=input_tokens,
 				output_tokens=output_tokens,
+				followup_claim_token=followup_claim_token,
 			)
 			# Retried stages replace their canonical audit event instead of
 			# accumulating misleading duplicate evaluations.
-			cursor.execute(
-				"DELETE FROM audit_log WHERE trace_id = %s AND event_type = %s AND agent = %s",
-				(trace_id, audit_event_type, from_agent),
-			)
+			if followup_claim_token is None:
+				cursor.execute(
+					"DELETE FROM audit_log WHERE trace_id = %s AND event_type = %s AND agent = %s",
+					(trace_id, audit_event_type, from_agent),
+				)
 			cursor.execute(
 				"""
 				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
@@ -578,7 +638,7 @@ class GCPRepository:
 					audit_event_type,
 					from_agent,
 					json.dumps(
-						{
+						_with_continuation_marker({
 							"handoff_id": handoff_id,
 							"from_agent": from_agent,
 							"to_agent": to_agent,
@@ -586,7 +646,7 @@ class GCPRepository:
 							"output": output_payload,
 							"input_tokens": input_tokens,
 							"output_tokens": output_tokens,
-						},
+						}, followup_claim_token),
 						ensure_ascii=False,
 					),
 				),
@@ -618,6 +678,7 @@ class GCPRepository:
 		policy_decision: dict[str, Any],
 		order_lookup_result: dict[str, Any],
 		refund_result: dict[str, Any],
+		followup_claim_token: str | None = None,
 	) -> tuple[str, str]:
 		"""Persist one idempotent refund transaction, handoff, audit row, and route."""
 
@@ -630,12 +691,20 @@ class GCPRepository:
 		amount = float(refund_result.get("amount") or 0)
 		if transaction_status == "issued" and amount <= 0:
 			raise CloudDatabaseError("Issued refund requires a positive amount")
-		transaction_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"idox-refund:{trace_id}"))
+		transaction_identity = f"idox-refund:{trace_id}"
+		if followup_claim_token is not None:
+			transaction_identity += f":customer_followup:{followup_claim_token}"
+		transaction_id = str(uuid.uuid5(uuid.NAMESPACE_URL, transaction_identity))
 
 		connection = self._connect()
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
+			_require_active_followup_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=followup_claim_token,
+			)
 			cursor.execute(
 				"""
 				SELECT approval_id FROM human_approvals
@@ -681,11 +750,13 @@ class GCPRepository:
 				output_payload={"refund_result": refund_result},
 				input_tokens=0,
 				output_tokens=0,
+				followup_claim_token=followup_claim_token,
 			)
-			cursor.execute(
-				"DELETE FROM audit_log WHERE trace_id = %s AND agent = 'refund_agent'",
-				(trace_id,),
-			)
+			if followup_claim_token is None:
+				cursor.execute(
+					"DELETE FROM audit_log WHERE trace_id = %s AND agent = 'refund_agent'",
+					(trace_id,),
+				)
 			cursor.execute(
 				"""
 				INSERT INTO audit_log (trace_id, event_type, agent, payload_json)
@@ -695,11 +766,11 @@ class GCPRepository:
 					trace_id,
 					"refund_issued" if transaction_status == "issued" else "refund_failed",
 					json.dumps(
-						{
+						_with_continuation_marker({
 							"transaction_id": transaction_id,
 							"handoff_id": handoff_id,
 							"refund_result": refund_result,
-						},
+						}, followup_claim_token),
 						ensure_ascii=False,
 					),
 				),
@@ -728,6 +799,7 @@ class GCPRepository:
 		reason: str,
 		stage: str,
 		policy_decision: dict[str, Any] | None = None,
+		followup_claim_token: str | None = None,
 	) -> str:
 		"""Create the one pending review row for a routed workflow, idempotently."""
 
@@ -744,6 +816,11 @@ class GCPRepository:
 		try:
 			connection.start_transaction()
 			cursor = connection.cursor()
+			_require_active_followup_claim(
+				cursor,
+				trace_id=trace_id,
+				claim_token=followup_claim_token,
+			)
 			cursor.execute(
 				"SELECT approval_id FROM human_approvals "
 				"WHERE trace_id = %s AND status = 'pending' ORDER BY created_at FOR UPDATE",
@@ -1644,21 +1721,44 @@ class GCPRepository:
 		finally:
 			connection.close()
 
-	def _upsert_handoff(self, cursor: Any, policy_input: PolicyAgentInput, output: PolicyAgentOutput, usage: TokenUsage) -> str:
-		cursor.execute(
-			"""
-			SELECT handoff_id FROM agent_handoffs
-			WHERE trace_id = %s AND ticket_id = %s AND from_agent = 'policy_agent'
-			ORDER BY created_at DESC
-			""",
-			(policy_input.case.trace_id, policy_input.case.ticket_id),
+	def _upsert_handoff(
+		self,
+		cursor: Any,
+		policy_input: PolicyAgentInput,
+		output: PolicyAgentOutput,
+		usage: TokenUsage,
+		*,
+		followup_claim_token: str | None = None,
+	) -> str:
+		if followup_claim_token is None:
+			cursor.execute(
+				"""
+				SELECT handoff_id FROM agent_handoffs
+				WHERE trace_id = %s AND ticket_id = %s AND from_agent = 'policy_agent'
+				ORDER BY created_at DESC
+				""",
+				(policy_input.case.trace_id, policy_input.case.ticket_id),
+			)
+			existing = [row[0] for row in cursor.fetchall()]
+			if len(existing) > 1:
+				raise CloudDatabaseError(f"{policy_input.case.trace_id}: multiple policy_agent handoffs already exist")
+			handoff_id = existing[0] if existing else self._next_handoff_id(
+				policy_input.case.trace_id,
+				"policy_agent",
+			)
+		else:
+			handoff_id = self._next_handoff_id(
+				policy_input.case.trace_id,
+				"policy_agent",
+				followup_claim_token=followup_claim_token,
+			)
+		input_payload = _with_continuation_marker(
+			policy_input.model_dump(mode="json"),
+			followup_claim_token,
 		)
-		existing = [row[0] for row in cursor.fetchall()]
-		if len(existing) > 1:
-			raise CloudDatabaseError(f"{policy_input.case.trace_id}: multiple policy_agent handoffs already exist")
-		handoff_id = existing[0] if existing else self._next_handoff_id(
-			policy_input.case.trace_id,
-			"policy_agent",
+		output_payload = _with_continuation_marker(
+			output.model_dump(mode="json"),
+			followup_claim_token,
 		)
 		cursor.execute(
 			"""
@@ -1677,8 +1777,8 @@ class GCPRepository:
 				policy_input.case.trace_id,
 				policy_input.case.ticket_id,
 				output.handoff.next_agent,
-				policy_input.model_dump_json(),
-				output.model_dump_json(),
+				json.dumps(input_payload, ensure_ascii=False),
+				json.dumps(output_payload, ensure_ascii=False),
 				usage.input_tokens,
 				usage.output_tokens,
 			),
@@ -1697,19 +1797,29 @@ class GCPRepository:
 		output_payload: dict[str, Any],
 		input_tokens: int,
 		output_tokens: int,
+		followup_claim_token: str | None = None,
 	) -> str:
-		cursor.execute(
-			"""
-			SELECT handoff_id FROM agent_handoffs
-			WHERE trace_id = %s AND ticket_id = %s AND from_agent = %s
-			ORDER BY created_at DESC
-			""",
-			(trace_id, ticket_id, from_agent),
-		)
-		existing = [row[0] for row in cursor.fetchall()]
-		if len(existing) > 1:
-			raise CloudDatabaseError(f"{trace_id}: multiple {from_agent} handoffs already exist")
-		handoff_id = existing[0] if existing else self._next_handoff_id(trace_id, from_agent)
+		if followup_claim_token is None:
+			cursor.execute(
+				"""
+				SELECT handoff_id FROM agent_handoffs
+				WHERE trace_id = %s AND ticket_id = %s AND from_agent = %s
+				ORDER BY created_at DESC
+				""",
+				(trace_id, ticket_id, from_agent),
+			)
+			existing = [row[0] for row in cursor.fetchall()]
+			if len(existing) > 1:
+				raise CloudDatabaseError(f"{trace_id}: multiple {from_agent} handoffs already exist")
+			handoff_id = existing[0] if existing else self._next_handoff_id(trace_id, from_agent)
+		else:
+			handoff_id = self._next_handoff_id(
+				trace_id,
+				from_agent,
+				followup_claim_token=followup_claim_token,
+			)
+		marked_input = _with_continuation_marker(input_payload, followup_claim_token)
+		marked_output = _with_continuation_marker(output_payload, followup_claim_token)
 		cursor.execute(
 			"""
 			INSERT INTO agent_handoffs (
@@ -1728,23 +1838,31 @@ class GCPRepository:
 				ticket_id,
 				from_agent,
 				to_agent,
-				json.dumps(input_payload, ensure_ascii=False),
-				json.dumps(output_payload, ensure_ascii=False),
+				json.dumps(marked_input, ensure_ascii=False),
+				json.dumps(marked_output, ensure_ascii=False),
 				input_tokens,
 				output_tokens,
 			),
 		)
 		return handoff_id
 
-	def _persist_policy_review(self, cursor: Any, output: PolicyAgentOutput) -> str | None:
-		cursor.execute(
-			"SELECT policy_review_event_id FROM policy_review_events WHERE trace_id = %s ORDER BY created_at",
-			(output.case.trace_id,),
-		)
-		existing = [row[0] for row in cursor.fetchall()]
-		if len(existing) > 1:
-			raise CloudDatabaseError(f"{output.case.trace_id}: multiple policy review rows already exist")
-		cursor.execute("DELETE FROM policy_review_events WHERE trace_id = %s", (output.case.trace_id,))
+	def _persist_policy_review(
+		self,
+		cursor: Any,
+		output: PolicyAgentOutput,
+		*,
+		followup_claim_token: str | None = None,
+	) -> str | None:
+		existing: list[str] = []
+		if followup_claim_token is None:
+			cursor.execute(
+				"SELECT policy_review_event_id FROM policy_review_events WHERE trace_id = %s ORDER BY created_at",
+				(output.case.trace_id,),
+			)
+			existing = [row[0] for row in cursor.fetchall()]
+			if len(existing) > 1:
+				raise CloudDatabaseError(f"{output.case.trace_id}: multiple policy review rows already exist")
+			cursor.execute("DELETE FROM policy_review_events WHERE trace_id = %s", (output.case.trace_id,))
 		if output.decision.type != "manual_review":
 			return None
 		event_id = existing[0] if existing else self._next_prefixed_id(
@@ -1752,7 +1870,11 @@ class GCPRepository:
 			"policy_review_events",
 			"policy_review_event_id",
 			"POL-REV-",
-			output.case.trace_id,
+			(
+				output.case.trace_id
+				if followup_claim_token is None
+				else f"{output.case.trace_id}:customer_followup:{followup_claim_token}"
+			),
 		)
 		gaps = output.policy_evaluation.gaps_or_conflicts
 		review_type = "low_confidence" if any(gap.type == "low_confidence" for gap in gaps) else "policy_rule"
@@ -1763,6 +1885,7 @@ class GCPRepository:
 			"matched_policies": [policy.model_dump(mode="json") for policy in output.policy_evaluation.matched_policies],
 			"gaps_or_conflicts": [gap.model_dump(mode="json") for gap in gaps],
 		}
+		evidence = _with_continuation_marker(evidence, followup_claim_token)
 		cursor.execute(
 			"""
 			INSERT INTO policy_review_events (
@@ -1783,24 +1906,36 @@ class GCPRepository:
 		)
 		return event_id
 
-	def _persist_governance(self, cursor: Any, output: PolicyAgentOutput, findings: list[GovernanceFinding]) -> list[str]:
-		cursor.execute(
-			"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = 'policy_agent' ORDER BY created_at",
-			(output.case.trace_id,),
-		)
-		existing = [row[0] for row in cursor.fetchall()]
-		cursor.execute(
-			"DELETE FROM governance_events WHERE trace_id = %s AND agent = 'policy_agent'",
-			(output.case.trace_id,),
-		)
+	def _persist_governance(
+		self,
+		cursor: Any,
+		output: PolicyAgentOutput,
+		findings: list[GovernanceFinding],
+		*,
+		followup_claim_token: str | None = None,
+	) -> list[str]:
+		existing: list[str] = []
+		if followup_claim_token is None:
+			cursor.execute(
+				"SELECT event_id FROM governance_events WHERE trace_id = %s AND agent = 'policy_agent' ORDER BY created_at",
+				(output.case.trace_id,),
+			)
+			existing = [row[0] for row in cursor.fetchall()]
+			cursor.execute(
+				"DELETE FROM governance_events WHERE trace_id = %s AND agent = 'policy_agent'",
+				(output.case.trace_id,),
+			)
 		event_ids: list[str] = []
 		for index, finding in enumerate(findings):
+			identity = f"{output.case.trace_id}:{index}:{finding.flag}"
+			if followup_claim_token is not None:
+				identity += f":customer_followup:{followup_claim_token}"
 			event_id = existing[index] if index < len(existing) else self._next_prefixed_id(
 				cursor,
 				"governance_events",
 				"event_id",
 				"POL-GOV-",
-				f"{output.case.trace_id}:{index}:{finding.flag}",
+				identity,
 			)
 			event_ids.append(event_id)
 			score = finding.score
@@ -1820,7 +1955,13 @@ class GCPRepository:
 					OWASP_BY_FLAG[finding.flag],
 					score,
 					output.governance.interceptor_action,
-					json.dumps({"finding": finding.model_dump(mode="json"), "governance": output.governance.model_dump(mode="json")}, ensure_ascii=False),
+					json.dumps(
+						_with_continuation_marker(
+							{"finding": finding.model_dump(mode="json"), "governance": output.governance.model_dump(mode="json")},
+							followup_claim_token,
+						),
+						ensure_ascii=False,
+					),
 					finding.offending_content,
 				),
 			)
@@ -1919,8 +2060,16 @@ class GCPRepository:
 		return existing[0] if existing else None
 
 	@staticmethod
-	def _next_handoff_id(trace_id: str, from_agent: str) -> str:
-		return str(uuid.uuid5(uuid.NAMESPACE_URL, f"idox-handoff:{trace_id}:{from_agent}"))
+	def _next_handoff_id(
+		trace_id: str,
+		from_agent: str,
+		*,
+		followup_claim_token: str | None = None,
+	) -> str:
+		identity = f"idox-handoff:{trace_id}:{from_agent}"
+		if followup_claim_token is not None:
+			identity += f":customer_followup:{followup_claim_token}"
+		return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
 
 	@staticmethod
 	def _next_prefixed_id(
@@ -2002,6 +2151,89 @@ def _validate_demo_trace_id(trace_id: str) -> str:
 	if not DEMO_TRACE_PATTERN.fullmatch(value):
 		raise ValueError("trace_id must be one of demo01 through demo20")
 	return value
+
+
+def _with_continuation_marker(
+	payload: dict[str, Any],
+	claim_token: str | None,
+) -> dict[str, Any]:
+	"""Return a JSON payload whose resumed customer turn is queryable."""
+
+	result = dict(payload)
+	if claim_token is not None:
+		result["_continuation"] = {
+			"type": "customer_followup",
+			"claim_token": claim_token,
+		}
+	return result
+
+
+def _require_active_followup_claim(
+	cursor: Any,
+	*,
+	trace_id: str,
+	claim_token: str | None,
+) -> None:
+	"""Fence every continuation write against the newest durable lease."""
+
+	if claim_token is None:
+		return
+	_validate_demo_trace_id(trace_id)
+	normalized_token = str(claim_token or "").strip()
+	if not normalized_token or len(normalized_token) > 64:
+		raise CloudDatabaseError(f"{trace_id}: invalid customer follow-up claim token")
+	cursor.execute(
+		"SELECT trace_id, status, current_agent FROM workflow_runs "
+		"WHERE trace_id = %s FOR UPDATE",
+		(trace_id,),
+	)
+	workflow = cursor.fetchone()
+	if workflow is None:
+		raise CloudDatabaseError(f"{trace_id}: workflow does not exist")
+	cursor.execute(
+		"SELECT payload_json FROM audit_log "
+		"WHERE trace_id = %s AND event_type = 'customer_followup_claimed' "
+		"ORDER BY log_id DESC LIMIT 1 FOR UPDATE",
+		(trace_id,),
+	)
+	row = cursor.fetchone()
+	if row is None:
+		raise CloudDatabaseError(f"{trace_id}: customer follow-up claim is missing")
+	payload = _json_object(row[0] if not isinstance(row, dict) else row.get("payload_json"))
+	if payload.get("claim_token") != normalized_token:
+		raise CloudDatabaseError(f"{trace_id}: stale customer follow-up claim token")
+	cursor.execute(
+		"SELECT payload_json FROM audit_log "
+		"WHERE trace_id = %s AND event_type = 'customer_followup_failed' "
+		"ORDER BY log_id DESC LIMIT 1 FOR UPDATE",
+		(trace_id,),
+	)
+	failure_row = cursor.fetchone()
+	if failure_row is not None:
+		failure_payload = _json_object(
+			failure_row[0]
+			if not isinstance(failure_row, dict)
+			else failure_row.get("payload_json")
+		)
+		if failure_payload.get("claim_token") == normalized_token:
+			raise CloudDatabaseError(
+				f"{trace_id}: failed customer follow-up claim token is revoked"
+			)
+	workflow_status = (
+		workflow.get("status") if isinstance(workflow, dict) else workflow[1]
+	)
+	if workflow_status != "running":
+		raise CloudDatabaseError(
+			f"{trace_id}: customer follow-up claim is not active"
+		)
+	cursor.execute(
+		"SELECT log_id FROM audit_log "
+		"WHERE trace_id = %s AND event_type = 'customer_followup_completed' "
+		"ORDER BY log_id FOR UPDATE",
+		(trace_id,),
+	)
+	if cursor.fetchone() is not None:
+		raise CloudDatabaseError(f"{trace_id}: customer follow-up is already completed")
 
 
 def _validate_review_request(
