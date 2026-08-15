@@ -144,6 +144,13 @@ def _governance_instructions() -> str:
           A customer giving an uncertain or mismatched order number for their own refund is a refund-policy conflict,
           not PII.
 
+        Standard structured evaluator keys and labels are not sensitive values. In particular, terms such as
+        policy_conflict, gaps_or_conflicts, precedent_evidence, evidence_manifest, memory_status, assessment,
+        support_count, explanation, and precedent_comparison_decision are expected internal schema vocabulary and do
+        not establish pii_risk by themselves. Flag pii_risk only when the quoted content contains an actual email,
+        an actual internal/customer-specific identifier, or text explicitly saying that data belongs to another
+        customer, user, or account.
+
         Required case.trace_id and case.ticket_id values are routing metadata. Their presence only in the case fields
         is not a leak. Every finding must use source="llm" and quote exact offending content from the customer request,
         order facts, policy evaluation, decision, response guidance, or evidence manifest. Do not cite case metadata.
@@ -194,6 +201,13 @@ def _validate_governance_assessment(
             errors.append(f"{finding.flag} must quote offending_content")
         elif not _content_is_supported(finding.offending_content, reviewable):
             errors.append(f"{finding.flag} offending_content is not present outside case metadata")
+        elif finding.flag == "pii_risk" and not _pii_risk_is_specific(
+            finding.offending_content
+        ):
+            errors.append(
+                "pii_risk must quote an actual email, customer-specific identifier, "
+                "or explicit other-customer data"
+            )
     if errors:
         raise ValueError("governance assessment validation errors: " + " | ".join(errors))
 
@@ -209,3 +223,24 @@ def _content_is_supported(offending_content: str, reviewable: str) -> bool:
         if len(token) >= 3 and token not in {"the", "and", "for", "from", "with"}
     }
     return bool(tokens) and tokens.issubset(set(re.findall(r"[a-z0-9@._-]+", searchable)))
+
+
+def _pii_risk_is_specific(offending_content: str) -> bool:
+    text = offending_content.casefold()
+    if re.search(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", text):
+        return True
+    if re.search(
+        r"\b(?:another|other|different|someone(?:\s+else)?['’]s)\s+"
+        r"(?:customer|user|account)\b",
+        text,
+    ):
+        return True
+    # Internal identifiers are values, not schema labels. Requiring a digit
+    # avoids treating generic keys such as precedent_evidence as leaked data.
+    return bool(
+        re.search(
+            r"\b(?:trace|ticket|workflow|customer|precedent)[-_]"
+            r"(?=[a-z0-9._-]*\d)[a-z0-9._-]{3,}\b",
+            text,
+        )
+    )

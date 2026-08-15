@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -117,6 +118,38 @@ def test_azure_governance_accepts_customer_pii_evidence() -> None:
     )
 
     assert result.value.findings[0].flag == "pii_risk"
+
+
+def test_azure_governance_rejects_schema_vocabulary_as_pii() -> None:
+    policy_input = make_input()
+    policy_result = make_policy_result(policy_input)
+    safe_internal_metadata = json.dumps(
+        policy_result.decision.precedent_evidence.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    assessment = GovernanceAssessment(
+        governance=Governance(
+            semantic_drift_score=0.0,
+            interceptor_action="quarantine",
+            flags=["pii_risk"],
+        ),
+        findings=[
+            GovernanceFinding(
+                flag="pii_risk",
+                detail="Internal workflow metadata was exposed.",
+                offending_content=safe_internal_metadata,
+                source="llm",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="pii_risk must quote an actual"):
+        AzurePolicyGovernanceReviewer(FakeAzureClient(assessment))(
+            {
+                "policy_input": policy_input,
+                "policy_result": policy_result,
+            }
+        )
 
 
 def test_policy_governance_allows_when_no_owasp_finding_exists() -> None:
