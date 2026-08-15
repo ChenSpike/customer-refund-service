@@ -72,6 +72,24 @@ class ResponsePersistenceArtifacts:
         }
 
 
+@dataclass(frozen=True)
+class RefundPersistenceArtifacts:
+    transaction_id: str
+    handoff_id: str
+    trace_id: str
+
+    def state_patch(self) -> dict[str, Any]:
+        return {
+            "current_stage": "refund_persistence",
+            "refund_persistence_result": {
+                "transaction_id": self.transaction_id,
+                "handoff_id": self.handoff_id,
+                "trace_id": self.trace_id,
+                "next_agent": "response_agent",
+            },
+        }
+
+
 class PipelineStore:
     """Own the single transactional write for a completed Policy subgraph."""
 
@@ -99,6 +117,7 @@ class PipelineStore:
             }
         )
         usage = policy_usage_from_state(state)
+        continuation_kwargs = _continuation_token_kwargs(state)
         handoff_id = self.persist_policy_artifacts(
             policy_input=reconstructed.policy_input,
             policy_output=policy_output,
@@ -106,6 +125,7 @@ class PipelineStore:
             precedent_context=reconstructed.precedent_context,
             governance_assessment=governance,
             usage=usage,
+            **continuation_kwargs,
         )
         next_agent = policy_output.handoff.next_agent
         return PolicyPersistenceArtifacts(
@@ -122,7 +142,7 @@ class PipelineStore:
         if handoff not in {"policy", "response", "human_review"}:
             raise ValueError("triage_handoff must be present before Triage persistence")
         next_agent = {
-            "policy": "policy",
+            "policy": "policy_agent",
             "response": "response_agent",
             "human_review": "human_approval",
         }[handoff]
@@ -144,6 +164,11 @@ class PipelineStore:
             },
             output_payload={
                 "triage_output": state.get("triage_output"),
+                **(
+                    {"order_resolution_source": state["order_resolution_source"]}
+                    if state.get("order_resolution_source")
+                    else {}
+                ),
                 "triage_governance_result": state.get("triage_governance_result"),
                 "triage_handoff": handoff,
             },
@@ -152,6 +177,7 @@ class PipelineStore:
             audit_event_type="triage_agent_evaluated",
             workflow_status="waiting_human" if next_agent == "human_approval" else "running",
             current_agent=next_agent,
+            **_continuation_token_kwargs(state),
         )
         return TriagePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
 
@@ -171,7 +197,13 @@ class PipelineStore:
             raise ValueError("ticket_id must be present before Response persistence")
         response_result = state.get("response_result") or {}
         workflow_status = str(response_result.get("workflow_status") or state.get("workflow_status") or "completed")
-        current_agent = "completed" if next_agent == "end" else next_agent
+        current_agent = next_agent
+        if next_agent == "end":
+            current_agent = {
+                "waiting_human": "human_approval",
+                "pending_human": "human_approval",
+                "waiting_user": "triage_agent",
+            }.get(workflow_status, "completed")
         handoff_id = self.repository.persist_agent_handoff(
             trace_id=trace_id,
             ticket_id=ticket_id,
@@ -192,8 +224,27 @@ class PipelineStore:
             audit_event_type="response_agent_evaluated",
             workflow_status=workflow_status,
             current_agent=current_agent,
+            **_continuation_token_kwargs(state),
         )
         return ResponsePersistenceArtifacts(handoff_id=handoff_id, trace_id=trace_id, next_agent=next_agent)
+
+    def persist_refund_state(self, state: dict[str, Any]) -> RefundPersistenceArtifacts:
+        trace_id = str(state.get("trace_id") or "")
+        ticket_id = str(state.get("ticket_id") or "")
+        refund_result = state.get("refund_result") or {}
+        transaction_id, handoff_id = self.repository.persist_refund_result(
+            trace_id=trace_id,
+            ticket_id=ticket_id,
+            policy_decision=state.get("policy_decision") or {},
+            order_lookup_result=state.get("order_lookup_result") or {},
+            refund_result=refund_result,
+            **_continuation_token_kwargs(state),
+        )
+        return RefundPersistenceArtifacts(
+            transaction_id=transaction_id,
+            handoff_id=handoff_id,
+            trace_id=trace_id,
+        )
 
     def persist_policy_artifacts(
         self,
@@ -204,7 +255,16 @@ class PipelineStore:
         precedent_context: PrecedentContext,
         governance_assessment: GovernanceAssessment,
         usage: TokenUsage,
+        followup_claim_token: str | None = None,
+        approval_claim_token: str | None = None,
     ) -> str:
+        if followup_claim_token is not None and approval_claim_token is not None:
+            raise ValueError("Policy persistence cannot use overlapping continuation claims")
+        kwargs: dict[str, str] = {}
+        if followup_claim_token is not None:
+            kwargs["followup_claim_token"] = followup_claim_token
+        if approval_claim_token is not None:
+            kwargs["approval_claim_token"] = approval_claim_token
         return self.repository.persist_result(
             policy_input,
             policy_output,
@@ -212,6 +272,7 @@ class PipelineStore:
             precedent_context,
             governance_assessment.findings,
             usage,
+            **kwargs,
         )
 
 
@@ -239,6 +300,14 @@ class ResponsePersistenceNode:
         return self.store.persist_response_state(state).state_patch()
 
 
+class RefundPersistenceNode:
+    def __init__(self, store: PipelineStore) -> None:
+        self.store = store
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:
+        return self.store.persist_refund_state(state).state_patch()
+
+
 def persist_policy_state(
     state: dict[str, Any],
     repository: GCPRepository | None = None,
@@ -255,3 +324,53 @@ def _validate_policy_handoff(
         raise ValueError("policy_handoff must be present before Policy persistence")
     if parent_agent_for_route(handoff) != output.handoff.next_agent:
         raise ValueError("policy_handoff disagrees with the validated Policy output")
+
+
+def _followup_claim_token(state: dict[str, Any]) -> str | None:
+    context = state.get("request_context") or {}
+    if context.get("continuation_type") != "customer_followup":
+        return None
+    token = str(context.get("followup_claim_token") or "").strip()
+    if not token:
+        raise ValueError("customer follow-up persistence requires a claim token")
+    return token
+
+
+def _followup_token_kwargs(state: dict[str, Any]) -> dict[str, str]:
+    token = _followup_claim_token(state)
+    return {"followup_claim_token": token} if token is not None else {}
+
+
+def _approval_claim_token(state: dict[str, Any]) -> str | None:
+    context = state.get("request_context") or {}
+    if context.get("continuation_type") != "human_approval":
+        return None
+    token = str(context.get("approval_claim_token") or "").strip()
+    approval_id = str(context.get("approval_id") or "").strip()
+    attempt = context.get("approval_attempt")
+    sequence = context.get("approval_sequence")
+    if not token or not approval_id:
+        raise ValueError("human-approval persistence requires its approval and claim token")
+    if (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+        or isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence < 1
+    ):
+        raise ValueError("human-approval persistence requires attempt and sequence")
+    return token
+
+
+def _continuation_token_kwargs(state: dict[str, Any]) -> dict[str, str]:
+    context = state.get("request_context") or {}
+    continuation_type = context.get("continuation_type")
+    if continuation_type in {None, ""}:
+        return {}
+    if continuation_type == "customer_followup":
+        return _followup_token_kwargs(state)
+    if continuation_type == "human_approval":
+        token = _approval_claim_token(state)
+        return {"approval_claim_token": token} if token is not None else {}
+    raise ValueError(f"Unsupported persistence continuation type: {continuation_type!r}")

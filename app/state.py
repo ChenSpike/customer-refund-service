@@ -34,6 +34,7 @@ class AppState(TypedDict, total=False):
     human_review_required: bool
     final_outcome: str
     requested_order_id: str
+    order_resolution_source: str
     clarification_question: str
     review_trigger_stage: str
     review_trigger_reason: str
@@ -59,6 +60,7 @@ class AppState(TypedDict, total=False):
 
     # downstream placeholders
     refund_result: dict[str, Any]
+    refund_persistence_result: dict[str, Any]
     response_result: dict[str, Any]
     response_handoff: str
     response_persistence_result: dict[str, Any]

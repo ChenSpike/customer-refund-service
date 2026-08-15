@@ -1,4 +1,4 @@
-"""Read-side access to the shared `orders`/`customers` input tables in main_db.
+"""Read-side access to the shared ``orders``/``customers`` tables in ``final``.
 
 Kept independent of db.database.GCPRepository on purpose: that module is
 write-oriented AND pulls in agents.policy (there is a latent circular import
@@ -18,7 +18,7 @@ import mysql.connector
 from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_DATABASE_NAME = "main_db"
+_DEFAULT_DATABASE_NAME = "final"
 
 # Correct JOIN: the contact belongs to the order's owner.
 _NORMAL_SQL = """
@@ -72,7 +72,7 @@ def _config() -> dict[str, Any]:
         "port": int(os.getenv("MYSQL_PORT", "3306")),
         "user": os.environ["MYSQL_USER"],
         "password": os.environ["MYSQL_PASSWORD"],
-        "database": _DATABASE_NAME,
+        "database": os.getenv("MYSQL_DATABASE", _DEFAULT_DATABASE_NAME),
         "connection_timeout": int(os.getenv("MYSQL_CONNECT_TIMEOUT", "10")),
     }
 

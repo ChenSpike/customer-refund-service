@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "status": "passed",
+  "completed_at": "2026-08-15T08:49:23.7795430Z",
+  "source": {
+    "branch": "final",
+    "commit": "21bdabb6a4397d63372006224e10cd7cfa628161",
+    "dirty_before_live_run": false,
+    "fixture": "database/fixtures/demo_cases.json",
+    "fixture_sha256": "c9ff098bd82281857a22a2cc66eddbdb17a2ac600bdcb79399d6ab88377f8206"
+  },
+  "live_run": {
+    "report": "reports/final-dashboard-baseline-run.json",
+    "sha256": "1ab3c30b2e88ad937b22f0d70d32a09e2f121ec53475379f462ecb6f4560922e",
+    "mode": "live",
+    "workers": 2,
+    "requested": 20,
+    "successful": 20,
+    "matched_expectations": 20,
+    "failed": 0,
+    "elapsed_ms": 406123.934
+  },
+  "database": {
+    "name": "final",
+    "canonical_root_fingerprint": "9df31897eb27ffb8b1e31d55500ec3a0fe246dfcaa4ae46b22679950176a1039",
+    "root_counts": {
+      "customers": 20,
+      "orders": 20,
+      "tickets": 20,
+      "workflow_runs": 20
+    },
+    "output_counts": {
+      "agent_handoffs": 62,
+      "audit_log": 62,
+      "governance_events": 40,
+      "policy_review_events": 8,
+      "human_approvals": 10,
+      "refund_transactions": 4
+    },
+    "orphan_checks": 0,
+    "workflow_statuses": {
+      "completed": 8,
+      "pending_human": 10,
+      "waiting_user": 2
+    }
+  },
+  "dashboard_projection": {
+    "case_count": 20,
+    "status_counts": {
+      "auto_approved": 4,
+      "rejected": 4,
+      "manual_review": 8,
+      "quarantined": 2,
+      "needs_info": 2,
+      "followup_approved": 0,
+      "human_approved": 0,
+      "execution_failed": 0
+    },
+    "pending_approvals": 10,
+    "persisted_governance_events": 40,
+    "audit_events": 62,
+    "needs_info_cases": [
+      "demo10",
+      "demo14"
+    ],
+    "quarantined_cases": [
+      "demo12",
+      "demo13"
+    ],
+    "assertions": {
+      "demo10_waiting_user_and_amount_not_provided": true,
+      "demo14_waiting_user_and_amount_not_provided": true,
+      "demo12_policy_not_evaluated_before_triage_block": true,
+      "demo13_policy_not_evaluated_and_null_score_is_na": true,
+      "demo07_full_approval_disabled_when_request_exceeds_remaining": true,
+      "demo08_full_approval_disabled_when_request_exceeds_remaining": true,
+      "all_persisted_governance_rows_visible": true,
+      "pending_queue_includes_governance_holds": true,
+      "timestamps_are_utc_normalized_and_not_globally_just_now": true,
+      "browser_console_warnings_or_errors": 0
+    }
+  },
+  "screenshots": [
+    {
+      "path": "reports/final-dashboard-baseline-overview.png",
+      "sha256": "e02a29953970f16560adb96bcda89a29876a38873c1ad4c284747c285db61203",
+      "bytes": 259108
+    },
+    {
+      "path": "reports/final-dashboard-demo10-needs-info.png",
+      "sha256": "44367069b018c92677a2889f6bae7768d2a2c2b3c25cf70341b18ad2526247a0",
+      "bytes": 230500
+    },
+    {
+      "path": "reports/final-dashboard-demo12-governance.png",
+      "sha256": "d29712f03ed1142ed561b6431a00cad14c561247b3bc03d14d0f99e8dc56cd12",
+      "bytes": 262569
+    },
+    {
+      "path": "reports/final-dashboard-governance-feed.png",
+      "sha256": "2a02899eeada98a80c0cd1dc754714e85410b1521ba9f95d47b76f62950ce781",
+      "bytes": 206562
+    }
+  ],
+  "local_validation": {
+    "pytest": "532 passed, 3 skipped, 1 existing warning",
+    "frontend_production_build": "compiled successfully",
+    "python_compileall": "passed",
+    "git_diff_check": "passed"
+  }
+}

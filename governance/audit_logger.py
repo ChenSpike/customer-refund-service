@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 
 def log_governance_event(
@@ -10,7 +10,7 @@ def log_governance_event(
 ) -> str:
     event_id = f"{trace_id}:governance:{stage}"
     payload = {
-        "timestamp": datetime.now(UTC).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_id": event_id,
         "trace_id": trace_id,
         "ticket_id": ticket_id,

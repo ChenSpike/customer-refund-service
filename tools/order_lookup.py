@@ -1,5 +1,5 @@
 """Order_Database_Lookup tool for the triage node. The actual read lives in
-db.orders (shared main_db read path); this module owns the LLM tool schema and
+db.orders (shared final-database read path); this module owns the LLM tool schema and
 the thin wrapper the node calls."""
 from db.orders import get_order
 
@@ -16,7 +16,7 @@ ORDER_LOOKUP_TOOL: dict = {
         "properties": {
             "order_id": {
                 "type": "string",
-                "description": "The order ID to look up (e.g. ORD-001)",
+                "description": "The order ID to look up (for example ORD-001 or order-demo01)",
             }
         },
         "required": ["order_id"],
