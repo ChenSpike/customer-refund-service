@@ -2692,14 +2692,22 @@ def test_repository_validates_resolution_fields_before_connecting(
 class PolicyApprovalCursor:
     def __init__(self, rows: list[tuple[str, str]]) -> None:
         self.rows = rows
+        self.fetchone_row: tuple[str] | None = None
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
         self.rowcount = 1
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        self.executed.append((" ".join(sql.split()), params))
+        compact = " ".join(sql.split())
+        self.executed.append((compact, params))
+        self.fetchone_row = (params[0],) if compact.startswith(
+            "SELECT trace_id FROM workflow_runs"
+        ) else None
 
     def fetchall(self) -> list[tuple[str, str]]:
         return list(self.rows)
+
+    def fetchone(self) -> tuple[str] | None:
+        return self.fetchone_row
 
 
 class PolicyApprovalConnection:
@@ -2752,8 +2760,12 @@ def test_policy_persistence_rejects_resolved_history_before_rewriting_dependenci
         )
 
     assert connection.rolled_back and not connection.committed
-    assert len(cursor.executed) == 1
-    assert cursor.executed[0][0].startswith("SELECT approval_id, status")
+    assert len(cursor.executed) == 2
+    assert cursor.executed[0] == (
+        "SELECT trace_id FROM workflow_runs WHERE trace_id = %s FOR UPDATE",
+        ("demo07",),
+    )
+    assert cursor.executed[1][0].startswith("SELECT approval_id, status")
 
 
 @pytest.mark.parametrize("status", ["approved", "rejected"])
@@ -2986,7 +2998,9 @@ class GenericHandoffCursor:
         compact = " ".join(sql.split())
         self.executed.append((compact, params))
         self.rowcount = 1
-        if compact.startswith("SELECT handoff_id FROM agent_handoffs"):
+        if compact.startswith("SELECT trace_id FROM workflow_runs"):
+            self.rows = [(params[0],)]
+        elif compact.startswith("SELECT handoff_id FROM agent_handoffs"):
             self.rows = []
         else:
             self.rows = []

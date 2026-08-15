@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,6 +41,9 @@ DEMO_TRACE_PATTERN = re.compile(r"^demo(?:0[1-9]|1[0-9]|20)$")
 # other transient connection failures instead of failing a demo case outright.
 TRANSIENT_MYSQL_ERRORS = frozenset({2003, 2006, 2013, 3024})
 MYSQL_CONNECT_ATTEMPTS = 3
+TRANSIENT_MYSQL_TRANSACTION_ERRORS = frozenset({1205, 1213})
+MYSQL_TRANSACTION_ATTEMPTS = 3
+MYSQL_TRANSACTION_RETRY_BASE_SECONDS = 0.1
 DEFAULT_CONTINUATION_LEASE_SECONDS = 30
 
 REQUIRED_COLUMNS = {
@@ -180,6 +184,33 @@ class HumanApprovalResolution:
 	continuation_claim_token: str | None
 	continuation_attempt: int | None
 	continuation_sequence: int | None
+
+
+def _retry_mysql_transaction(method: Any) -> Any:
+	"""Retry a rolled-back transaction by invoking the public method afresh.
+
+	MySQL deadlocks (1213) and lock-wait timeouts (1205) are concurrency
+	outcomes, not deterministic workflow failures.  Every decorated method owns
+	one connection and closes it before propagating an error, so re-entering the
+	method guarantees a new connection, cursor, transaction, and lock snapshot.
+	Other database errors are surfaced unchanged.
+	"""
+
+	@wraps(method)
+	def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+		for attempt in range(1, MYSQL_TRANSACTION_ATTEMPTS + 1):
+			try:
+				return method(self, *args, **kwargs)
+			except mysql.connector.Error as error:
+				if (
+					error.errno not in TRANSIENT_MYSQL_TRANSACTION_ERRORS
+					or attempt == MYSQL_TRANSACTION_ATTEMPTS
+				):
+					raise
+				time.sleep(MYSQL_TRANSACTION_RETRY_BASE_SECONDS * attempt)
+		raise AssertionError("transaction retry loop exited unexpectedly")
+
+	return wrapped
 
 
 class GCPRepository:
@@ -349,6 +380,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def save_governance_event_record(
 		self,
 		statement: GovernanceStatement,
@@ -502,6 +534,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def persist_result(
 		self,
 		policy_input: PolicyAgentInput,
@@ -524,6 +557,8 @@ class GCPRepository:
 				followup_claim_token=followup_claim_token,
 				approval_claim_token=approval_claim_token,
 			)
+			if continuation_marker is None:
+				_lock_workflow_row(cursor, trace_id)
 			# Lock and reject resolved review history before replacing Policy
 			# handoffs, review events, or governance events.  This keeps a legacy
 			# trigger FK (including an unexpected cascading FK) from deleting a
@@ -577,10 +612,11 @@ class GCPRepository:
 				continuation_marker=continuation_marker,
 			)
 			if continuation_marker is None:
-				cursor.execute(
-					"DELETE FROM audit_log WHERE trace_id = %s "
-					"AND event_type = 'policy_agent_evaluated' AND agent = 'policy_agent'",
-					(trace_id,),
+				_delete_existing_audit_rows(
+					cursor,
+					trace_id=trace_id,
+					event_type="policy_agent_evaluated",
+					agent="policy_agent",
 				)
 			cursor.execute(
 				"""
@@ -608,6 +644,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def persist_agent_handoff(
 		self,
 		*,
@@ -636,6 +673,8 @@ class GCPRepository:
 				followup_claim_token=followup_claim_token,
 				approval_claim_token=approval_claim_token,
 			)
+			if continuation_marker is None:
+				_lock_workflow_row(cursor, trace_id)
 			handoff_id = self._upsert_generic_handoff(
 				cursor,
 				trace_id=trace_id,
@@ -651,9 +690,11 @@ class GCPRepository:
 			# Retried stages replace their canonical audit event instead of
 			# accumulating misleading duplicate evaluations.
 			if continuation_marker is None:
-				cursor.execute(
-					"DELETE FROM audit_log WHERE trace_id = %s AND event_type = %s AND agent = %s",
-					(trace_id, audit_event_type, from_agent),
+				_delete_existing_audit_rows(
+					cursor,
+					trace_id=trace_id,
+					event_type=audit_event_type,
+					agent=from_agent,
 				)
 			cursor.execute(
 				"""
@@ -697,6 +738,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def persist_refund_result(
 		self,
 		*,
@@ -729,6 +771,8 @@ class GCPRepository:
 				followup_claim_token=followup_claim_token,
 				approval_claim_token=approval_claim_token,
 			)
+			if continuation_marker is None:
+				_lock_workflow_row(cursor, trace_id)
 			transaction_identity = f"idox-refund:{trace_id}"
 			if continuation_marker is not None:
 				if continuation_marker.get("type") == "human_approval":
@@ -795,9 +839,10 @@ class GCPRepository:
 				continuation_marker=continuation_marker,
 			)
 			if continuation_marker is None:
-				cursor.execute(
-					"DELETE FROM audit_log WHERE trace_id = %s AND agent = 'refund_agent'",
-					(trace_id,),
+				_delete_existing_audit_rows(
+					cursor,
+					trace_id=trace_id,
+					agent="refund_agent",
 				)
 			cursor.execute(
 				"""
@@ -834,6 +879,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def ensure_human_approval(
 		self,
 		*,
@@ -986,6 +1032,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def resolve_human_approval(
 		self,
 		*,
@@ -1319,6 +1366,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def mark_human_approval_continuation(
 		self,
 		*,
@@ -1421,6 +1469,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def record_human_approval_continuation_failure(
 		self,
 		*,
@@ -1474,6 +1523,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def heartbeat_human_approval_continuation(
 		self,
 		*,
@@ -1773,6 +1823,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def record_workflow_failure(
 		self,
 		*,
@@ -1859,6 +1910,7 @@ class GCPRepository:
 		finally:
 			connection.close()
 
+	@_retry_mysql_transaction
 	def record_failure(self, trace_id: str, error: Exception) -> None:
 		payload = json.dumps({"error_type": type(error).__name__, "message": str(error)}, ensure_ascii=False)
 		connection = self._connect()
@@ -3534,6 +3586,52 @@ def _approval_trigger(trace_id: str, policy_event_id: str | None, governance_eve
 	if policy_event_id:
 		return "policy_review", policy_event_id
 	raise CloudDatabaseError(f"{trace_id}: human approval requires a governance or policy review event")
+
+
+def _delete_existing_audit_rows(
+	cursor: Any,
+	*,
+	trace_id: str,
+	agent: str,
+	event_type: str | None = None,
+) -> int:
+	"""Replace canonical audit rows without locking an empty secondary-index gap.
+
+	A range DELETE on ``(trace_id, event_type, agent)`` acquires an InnoDB gap
+	lock even when no row exists. Parallel demo cases can then deadlock when both
+	transactions insert their first audit row. A normal consistent SELECT takes
+	no such lock; any rows it finds are removed through exact primary-key
+	lookups, while the common empty case performs no DELETE at all.
+	"""
+
+	query = "SELECT log_id FROM audit_log WHERE trace_id = %s AND agent = %s"
+	params: tuple[Any, ...] = (trace_id, agent)
+	if event_type is not None:
+		query += " AND event_type = %s"
+		params += (event_type,)
+	query += " ORDER BY log_id"
+	cursor.execute(query, params)
+	log_ids = [int(row[0]) for row in cursor.fetchall()]
+	for log_id in log_ids:
+		cursor.execute("DELETE FROM audit_log WHERE log_id = %s", (log_id,))
+	return len(log_ids)
+
+
+def _lock_workflow_row(cursor: Any, trace_id: str) -> None:
+	"""Serialize baseline persistence for one existing workflow trace.
+
+	The exact primary-key lock is acquired before any consistent read creates a
+	REPEATABLE READ snapshot. A same-trace writer that waits here therefore sees
+	the preceding writer's committed canonical audit row, while unrelated traces
+	lock different records and remain concurrent.
+	"""
+
+	cursor.execute(
+		"SELECT trace_id FROM workflow_runs WHERE trace_id = %s FOR UPDATE",
+		(trace_id,),
+	)
+	if cursor.fetchone() is None:
+		raise CloudDatabaseError(f"{trace_id}: workflow does not exist")
 
 
 def _require_workflow_row(cursor: Any, trace_id: str) -> None:
