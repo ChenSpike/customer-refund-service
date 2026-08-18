@@ -79,8 +79,23 @@ function MetricsIcon(props) {
   );
 }
 
+function SidebarToggleIcon({ collapsed, ...props }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" {...props}>
+      <path d="M2.5 2.5h11v11h-11z" stroke="currentColor" strokeWidth="1.2" rx="1" />
+      <path d="M6 2.5v11" stroke="currentColor" strokeWidth="1.2" />
+      {collapsed ? (
+        <path d="m9.2 8 2-2M9.2 8l2 2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      ) : (
+        <path d="m10.8 8-2-2M10.8 8l-2 2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+    </svg>
+  );
+}
+
 function App() {
   const [activeNav, setActiveNav] = useState('overview');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [selectedTraceId, setSelectedTraceId] = useState(traceFromLocation);
   const [previewTraceId, setPreviewTraceId] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -167,6 +182,7 @@ function App() {
   const pendingCount = pendingApprovalCount ?? fallbackPendingCount;
 
   const showDetail = !!selectedTraceId;
+  const sidebarWidth = isSidebarCollapsed ? 84 : 230;
 
   return (
     <div style={{
@@ -174,31 +190,79 @@ function App() {
       fontFamily: "'Space Grotesk',-apple-system,BlinkMacSystemFont,sans-serif", overflow: 'hidden',
     }}>
       <aside style={{
-        width: 230, flexShrink: 0, background: colors.sidebarBg, borderRight: `1px solid ${colors.border}`,
+        width: sidebarWidth, flexShrink: 0, background: colors.sidebarBg, borderRight: `1px solid ${colors.border}`,
         display: 'flex', flexDirection: 'column', padding: '20px 14px', boxSizing: 'border-box',
+        transition: 'width 180ms ease', position: 'relative',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px 22px' }}>
-          <div style={{
-            width: 32, height: 32, borderRadius: 7, background: colors.navy, color: colors.navyText,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 15, flexShrink: 0,
-          }}>C</div>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '-0.01em' }}>Customer Refund Service</div>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px 22px',
+          justifyContent: isSidebarCollapsed ? 'center' : 'flex-start',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: 7, background: colors.navy, color: colors.navyText,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 15, flexShrink: 0,
+            }}>C</div>
+            {!isSidebarCollapsed && (
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '-0.01em' }}>Customer Refund Service</div>
+              </div>
+            )}
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => setIsSidebarCollapsed((value) => !value)}
+          title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          style={{
+            position: 'absolute',
+            top: 18,
+            right: -15,
+            width: 30,
+            height: 30,
+            borderRadius: 999,
+            border: `1px solid ${colors.border}`,
+            background: colors.card,
+            color: colors.textMuted,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            zIndex: 2,
+            boxShadow: '0 4px 14px oklch(0.22 0.02 260 / 0.08)',
+          }}
+        >
+          <SidebarToggleIcon collapsed={isSidebarCollapsed} />
+        </button>
 
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = !showDetail && activeNav === item.key;
             return (
-              <button key={item.key} onClick={() => goNav(item.key)} style={navButtonStyle(active)}>
+              <button
+                key={item.key}
+                onClick={() => goNav(item.key)}
+                title={isSidebarCollapsed ? item.label : undefined}
+                aria-label={item.label}
+                style={{
+                  ...navButtonStyle(active),
+                  justifyContent: isSidebarCollapsed ? 'center' : 'flex-start',
+                  padding: isSidebarCollapsed ? '10px 0' : '9px 12px',
+                  position: 'relative',
+                }}
+              >
                 <Icon style={{ flexShrink: 0 }} />
-                <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>
+                {!isSidebarCollapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
                 {item.key === 'approvals' && pendingCount > 0 && (
                   <span style={{
                     fontSize: 10.5, fontFamily: 'ui-monospace,monospace', background: 'oklch(0.55 0.15 80 / 0.16)',
                     color: 'oklch(0.42 0.15 80)', padding: '1px 6px', borderRadius: 10,
+                    position: isSidebarCollapsed ? 'absolute' : 'static',
+                    top: isSidebarCollapsed ? 6 : 'auto',
+                    right: isSidebarCollapsed ? 8 : 'auto',
                   }}>{pendingCount}</span>
                 )}
               </button>
@@ -206,19 +270,29 @@ function App() {
           })}
         </nav>
 
-        <div style={{ marginTop: 'auto', padding: '14px 8px 4px', borderTop: `1px solid ${colors.border}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          marginTop: 'auto', padding: '14px 8px 4px', borderTop: `1px solid ${colors.border}`,
+          display: 'flex', flexDirection: 'column', alignItems: isSidebarCollapsed ? 'center' : 'stretch',
+        }}>
+          <div
+            title={health.status === 'ok' ? 'Dashboard + database connected' : 'Dashboard database unavailable'}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: isSidebarCollapsed ? 'center' : 'flex-start' }}
+          >
             <div style={{
               width: 7, height: 7, borderRadius: '50%',
               background: health.status === 'ok' ? colors.good : colors.danger,
             }} />
-            <div style={{ fontSize: 11, color: colors.textMuted }}>
-              {health.status === 'ok' ? 'Dashboard + database connected' : 'Dashboard database unavailable'}
+            {!isSidebarCollapsed && (
+              <div style={{ fontSize: 11, color: colors.textMuted }}>
+                {health.status === 'ok' ? 'Dashboard + database connected' : 'Dashboard database unavailable'}
+              </div>
+            )}
+          </div>
+          {!isSidebarCollapsed && (
+            <div style={{ fontSize: 10.5, color: colors.textFainter, marginTop: 6, fontFamily: 'ui-monospace,monospace' }}>
+              policy_version v1.0
             </div>
-          </div>
-          <div style={{ fontSize: 10.5, color: colors.textFainter, marginTop: 6, fontFamily: 'ui-monospace,monospace' }}>
-            policy_version v1.0
-          </div>
+          )}
         </div>
       </aside>
 
