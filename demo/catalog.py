@@ -318,20 +318,30 @@ def _parse_case(
             raise DemoCatalogError(f"{trace_id}: order.{field} must be numeric")
     _required_text(ticket, "raw_text", trace_id)
 
-    legacy_policy_decision = _required_text(
-        expectations, "legacy_policy_decision", trace_id
+    policy_decision = _required_text_any(
+        expectations,
+        ("policy_decision", "legacy_policy_decision"),
+        trace_id,
     )
-    legacy_policy_route = _required_text(expectations, "legacy_policy_route", trace_id)
+    policy_route = _required_text_any(
+        expectations,
+        ("policy_route", "legacy_policy_route"),
+        trace_id,
+    )
     policy_was_bypassed = trace_id in {"demo12", "demo13"}
     parsed_expectations = DemoExpectations(
         # These two cases are stopped by deterministic Triage governance before
         # Policy runs. Keep the historic Policy-only oracle in the raw fixture,
         # but never advertise it as an observed end-to-end result.
-        policy_decision=None if policy_was_bypassed else legacy_policy_decision,
-        policy_route=None if policy_was_bypassed else legacy_policy_route,
-        route=_required_text(expectations, "e2e_route", trace_id),
-        outcome=_required_text(expectations, "e2e_outcome", trace_id),
-        terminal_state=_required_text(expectations, "e2e_terminal_state", trace_id),
+        policy_decision=None if policy_was_bypassed else policy_decision,
+        policy_route=None if policy_was_bypassed else policy_route,
+        route=_required_text_any(expectations, ("route", "e2e_route"), trace_id),
+        outcome=_required_text_any(expectations, ("outcome", "e2e_outcome"), trace_id),
+        terminal_state=_required_text_any(
+            expectations,
+            ("terminal_state", "e2e_terminal_state"),
+            trace_id,
+        ),
     )
     follow_up = _parse_follow_up(value.get("follow_up"), trace_id)
     if (trace_id in {"demo10", "demo14"}) != (follow_up is not None):
@@ -422,3 +432,12 @@ def _required_text(value: dict[str, Any], field: str, label: str) -> str:
     if not isinstance(result, str) or not result.strip():
         raise DemoCatalogError(f"{label}: {field} must be non-empty text")
     return result
+
+
+def _required_text_any(value: dict[str, Any], fields: tuple[str, ...], label: str) -> str:
+    for field in fields:
+        result = value.get(field)
+        if isinstance(result, str) and result.strip():
+            return result
+    joined = " or ".join(fields)
+    raise DemoCatalogError(f"{label}: {joined} must be non-empty text")

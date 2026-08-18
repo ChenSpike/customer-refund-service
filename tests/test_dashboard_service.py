@@ -432,6 +432,47 @@ def test_case_detail_projects_latest_human_approval_cycle_and_keeps_full_timelin
     assert detail["pipeline"][7]["state"] == "done"
 
 
+def test_case_detail_prefers_successful_human_continuation_over_stale_failed_workflow() -> None:
+    bundle = copy.deepcopy(_bundle("demo07"))
+    bundle["workflow"]["status"] = "failed"
+
+    final_response = json.loads(bundle["handoffs"][2]["output_json"])
+    final_response["response_result"].update(
+        {
+            "final_outcome": "partial_refund",
+            "workflow_status": "completed",
+        }
+    )
+    bundle["handoffs"][2]["output_json"] = json.dumps(final_response)
+    bundle["approvals"] = [
+        {
+            "approval_id": "POL-APP-007",
+            "trace_id": "demo07",
+            "triggering_event_type": "policy_review",
+            "status": "approved",
+            "notes": "Approved after reviewing the evidence.",
+            "created_at": NOW,
+            "resolved_at": NOW,
+        }
+    ]
+    bundle["refunds"] = [
+        {
+            "transaction_id": "RF-DEMO-07",
+            "trace_id": "demo07",
+            "amount": 40.0,
+            "currency": "USD",
+            "status": "issued",
+            "external_ref": "ext-demo07",
+            "created_at": NOW,
+        }
+    ]
+
+    detail = build_case_detail(bundle)
+
+    assert detail["status"] == "human_approved"
+    assert detail["refund"]["status"] == "issued"
+
+
 def test_case_timeline_uses_numeric_audit_primary_key_on_same_second() -> None:
     bundle = _bundle("demo01")
     timestamp = "2026-08-14T12:00:00"
