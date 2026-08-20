@@ -546,6 +546,8 @@ def _derive_status(
     workflow_status = str(workflow.get("status") or "").lower()
     outcome = str(final_outcome or "").lower()
     refund_statuses = {str(row.get("status") or "").lower() for row in refunds}
+    refund_succeeded = bool(refund_statuses & {"issued", "success"})
+    outcome_succeeded = outcome in {"approved", "partial_refund"}
     resolved_human_review = any(
         str(row.get("status") or "").lower() in {"approved", "rejected"}
         or row.get("resolved_at") is not None
@@ -557,11 +559,13 @@ def _derive_status(
         return "manual_review"
     if outcome == "need_info" or decision == "request_info" or workflow_status == "waiting_user":
         return "needs_info"
-    if outcome == "refund_failed" or workflow_status == "failed" or refund_statuses & {"failed", "blocked"}:
+    if outcome == "refund_failed" or refund_statuses & {"failed", "blocked"}:
+        return "execution_failed"
+    if workflow_status == "failed" and not (refund_succeeded or outcome_succeeded):
         return "execution_failed"
     if outcome == "denied" or decision == "deny":
         return "rejected"
-    if outcome in {"approved", "partial_refund"} or refund_statuses & {"issued", "success"}:
+    if outcome_succeeded or refund_succeeded:
         if resolved_human_review:
             return "human_approved"
         if resolution_path == "customer_followup":
