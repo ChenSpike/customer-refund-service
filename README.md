@@ -1,13 +1,46 @@
 # Customer Refund Service
 
-An automated, state-driven multi-agent workflow for evaluating and processing e-commerce customer refund requests. This repository contains the core workflow, supporting APIs, dashboard, refund entrypoints, persistence layer, and test suite.
+A demo project for handling customer refund requests with a multi-step workflow. It shows how a case can move through triage, policy checks, follow-up, human approval, refund execution, and customer response instead of being treated as a single yes-or-no action.
 
-The root README is the project entry point. Demo scripts, guarded database operations, and acceptance flows are documented in focused guides so the main branch documentation stays operational and readable.
+- A refund API and UI for submitting cases.
+- A dashboard for tracking case status, follow-up, and approvals.
+- A workflow engine that decides what should happen next for each case.
+- Human review and governance checks for cases that should not be auto-approved.
 
-## What Is In This Repository
+## Dashboard Preview
 
-- `agents/`: domain agents such as triage, policy, refund, and response.
-- `app/`: shared workflow graph, state, and mapping logic.
+The dashboard is the main reviewer surface. It makes workflow state visible, separates cases that need follow-up from cases ready for action, and highlights governance-driven holds.
+
+### Overview
+
+A high-level summary of case status, workflow outcomes, and queue health.
+
+![Dashboard overview](figures/dashboard-overview.png)
+
+### Needs More Information
+
+Cases waiting for customer follow-up are separated clearly from completed or review-ready work.
+
+![Dashboard needs more information](figures/dashboard-needs-info.png)
+
+### Governance Review
+
+Governance-driven holds and escalations are visible so reviewers can inspect risky or blocked cases quickly.
+
+![Dashboard governance review](figures/dashboard-governance-review.png)
+
+## Core Experience
+
+From a reader's perspective, the project has three main surfaces:
+
+- Refund intake: the public-facing API and UI entrypoint for refund requests.
+- Reviewer dashboard: the operational view for approvals, follow-up, and governance outcomes.
+- Workflow engine: the state graph that decides how each case moves through the system.
+
+## Repository Map
+
+- `agents/`: domain agents for triage, policy, refund, and response behavior.
+- `app/`: shared workflow graph, state definitions, and mapping logic.
 - `dashboard_app/`: dashboard API and approval services.
 - `refund_app/`: refund-facing API, static UI, and simulator helpers.
 - `db/`: database access, admin commands, and persistence helpers.
@@ -15,11 +48,11 @@ The root README is the project entry point. Demo scripts, guarded database opera
 - `frontend/`: React dashboard frontend.
 - `tests/`: unit, integration, and UI-oriented test coverage.
 
-## Setup
+## Quick Start
 
 Run commands from the repository root. Python 3.11+ and Node.js 20+ are the supported targets.
 
-### Python
+### 1. Install Python dependencies
 
 ```powershell
 py -3.12 -m venv .venv
@@ -35,7 +68,7 @@ Copy-Item .env.example .env
 
 Azure OpenAI and MySQL-backed flows require the settings described in `.env.example`. Keep credentials out of source control.
 
-### Frontend
+### 2. Install frontend dependencies
 
 ```powershell
 Set-Location frontend
@@ -44,30 +77,28 @@ npm run build
 Set-Location ..
 ```
 
-## Run The Services
+### 3. Start the services
 
-### Dashboard backend
+Dashboard backend:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn dashboard_app.api:app --host 127.0.0.1 --port 8000
 ```
 
-### Dashboard frontend
+Dashboard frontend:
 
 ```powershell
 Set-Location frontend
 npm start
 ```
 
-The frontend defaults to `http://localhost:8000`. Set `REACT_APP_API_URL` before startup when the backend uses another origin.
-
-### Refund API
+Refund API:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn refund_app.api:app --host 127.0.0.1 --port 8077
 ```
 
-For refund API modes, selectors, and follow-up behavior, see `refund_app/README.md`.
+The frontend defaults to `http://localhost:8000`. Set `REACT_APP_API_URL` before startup when the backend uses another origin.
 
 ## Run The Workflow
 

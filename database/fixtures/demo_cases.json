@@ -80,7 +80,7 @@
       "customer": {"email": "sara.ng.test@example.com", "full_name": "Sara Ng"},
       "order": {"product_type": "computer_monitor", "purchase_date": "2026-06-12", "item_status": "damaged", "amount_paid": 299.99, "prior_refund_total": 100.0, "currency": "USD"},
       "ticket": {"raw_text": "Monitor from order-demo07 arrived with a broken panel. I received a partial credit before, but the display still cannot be used and I need the remaining amount reviewed.", "sanitized_text": "Monitor from order-demo07 arrived with a broken panel. I received a partial credit before, but the display still cannot be used and I need the remaining amount reviewed.", "refund_reason": "damaged", "requested_amount": 299.99, "currency": "USD", "injection_flag": false},
-      "expectations": {"legacy_policy_decision": "manual_review", "legacy_policy_route": "human_approval", "e2e_route": "human_approval", "e2e_outcome": "manual_review", "e2e_terminal_state": "pending_human"}
+      "expectations": {"policy_decision": "partial_refund", "policy_route": "human_approval", "route": "human_approval", "outcome": "partial_refund", "terminal_state": "pending_human"}
     },
     {
       "trace_id": "demo08",

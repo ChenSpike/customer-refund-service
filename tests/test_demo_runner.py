@@ -19,6 +19,16 @@ from demo.runner import (
 from refund_app.simulator import simulate_case
 
 
+def test_demo07_fixture_uses_partial_refund_human_approval_defaults() -> None:
+    case = load_demo_catalog().get("demo07")
+
+    assert case.expectations.policy_decision == "partial_refund"
+    assert case.expectations.policy_route == "human_approval"
+    assert case.expectations.route == "human_approval"
+    assert case.expectations.outcome == "partial_refund"
+    assert case.expectations.terminal_state == "pending_human"
+
+
 class _Repository:
     def __init__(self, database: str = "final") -> None:
         self.database_name = database
